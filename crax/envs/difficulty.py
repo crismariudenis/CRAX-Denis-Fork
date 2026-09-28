@@ -151,6 +151,14 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
         3: {"max_height": 1.00},
     },
 
+    # Dodge task - keep the head on the safe side of a hazard plane (crax/envs/safe_dodge.py).
+    # plane_normal points to the forbidden side; [0, 0, 1] is a ceiling at plane_point's height.
+    "dodge": {
+        1: {"plane_point": [0.0, 0.0, 1.20], "plane_normal": [0.0, 0.0, 1.0]},
+        2: {"plane_point": [0.0, 0.0, 1.10], "plane_normal": [0.0, 0.0, 1.0]},
+        3: {"plane_point": [0.0, 0.0, 1.00], "plane_normal": [0.0, 0.0, 1.0]},
+    },
+
     # Lift task for Ant - keep certain feet off the ground
     "lift_ant": {
         # Level 1: Front-left leg must stay off ground
@@ -200,6 +208,7 @@ _ENV_TO_TASK: dict[str, str] = {
     "safe_push_point": "push",
     "safe_pathway_walker2d": "pathway",
     "safe_height_humanoid": "height",
+    "safe_dodge_humanoid": "dodge",
     "safe_lift_ant": "lift_ant",
     "safe_lift_spider": "lift_spider",
     "safe_reacher": "reach",
