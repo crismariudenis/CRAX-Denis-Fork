@@ -14,11 +14,10 @@
 
 """Dodge environment.
 
-The agent must stay healthy while keeping its body out of a hazard plane's
-forbidden side. The plane is defined by a point and a normal; everything on the
-side the normal points to is forbidden. A horizontal plane with normal (0, 0, 1)
-is a ceiling, like the height task (safe_height.py). Moving/tilted planes will be
-added on top of this.
+The agent must stay healthy while keeping every body part's hitbox from
+intersecting a hazard plane. The plane is defined by a point and a normal (its
+orientation; neither side is special) and is tilted randomly every episode.
+Moving planes will be added on top of this.
 """
 
 from abc import ABC, abstractmethod
@@ -40,32 +39,18 @@ from crax.io import mjcf
 class SafeDodge(PipelineEnv, ABC):
     """Abstract base class for hazard-plane environments.
 
-    The agent must stay healthy while keeping its body on the safe side of a
-    hazard plane. The constraint violation (cost) is how far the agent reaches
-    past the plane.
+    The agent must stay healthy on a round platform while keeping its body-part
+    hitboxes out of a hazard plane. The cost is how deep they cut into it.
 
     Subclasses must implement agent-specific properties for:
     - XML file path
     - Body configuration
-    - Head geometry
     """
 
     @property
     @abstractmethod
     def agent_xml_path(self) -> str:
         """Return the path to the agent's XML file."""
-        pass
-
-    @property
-    @abstractmethod
-    def head_local_offset(self) -> jp.ndarray:
-        """Return the local offset of the head from the torso body."""
-        pass
-
-    @property
-    @abstractmethod
-    def head_radius(self) -> float:
-        """Return the radius of the head geometry for the plane distance."""
         pass
 
     @property
@@ -95,14 +80,15 @@ class SafeDodge(PipelineEnv, ABC):
             self,
             ctrl_cost_weight=0.1,
             healthy_reward=5.0,
-            height_reward_weight: float = 1.0,
+            height_reward_weight: float = 5.0,
             terminate_when_unhealthy=True,
             healthy_z_range: Optional[Tuple[float, float]] = None,
             reset_noise_scale=1e-2,
             plane_point: Tuple[float, float, float] = (0.0, 0.0, 1.2),
             plane_normal: Tuple[float, float, float] = (0.0, 0.0, 1.0),
             plane_cost_weight: float = 1.25,
-            platform_radius: float = 1.5,
+            plane_tilt_range: float = 90.0,
+            platform_radius: float = 0.75,
             episode_length: int = 1000,
             backend: str = 'generalized',
             **kwargs,
@@ -112,27 +98,36 @@ class SafeDodge(PipelineEnv, ABC):
         Args:
             ctrl_cost_weight: Weight for control cost penalty.
             healthy_reward: Reward for staying healthy (alive).
-            height_reward_weight: Reward per metre of torso height. Standing tall
-                pays more, which conflicts with ducking under the plane.
+            height_reward_weight: Reward per step for standing fully upright. Scales
+                linearly from 0 at the fall height (healthy_z_range min) to this at
+                the spawn height, so ducking under the plane costs reward.
             terminate_when_unhealthy: Whether to terminate episode when unhealthy.
             healthy_z_range: (min, max) z-range for healthy state.
             reset_noise_scale: Scale of noise added to initial state.
             plane_point: Any point [x, y, z] on the hazard plane.
-            plane_normal: Normal [x, y, z] of the hazard plane, pointing to the
-                forbidden side. Normalized internally. [0, 0, 1] is a ceiling.
-            plane_cost_weight: Cost per metre the head reaches past the plane.
+            plane_normal: Normal [x, y, z] of the untilted hazard plane; sets its
+                orientation only. Normalized internally. [0, 0, 1] is horizontal.
+            plane_cost_weight: Cost per metre of hitbox overlap with the plane,
+                summed over all body parts.
+            plane_tilt_range: Max random tilt of the plane in degrees, per axis,
+                drawn at every reset (see _sample_plane_tilt). 0 keeps it fixed,
+                90 allows a vertical wall.
             platform_radius: Radius in metres of the round platform the agent
                 stands on, centred on the origin. The torso leaving it counts as a fall.
             episode_length: Maximum number of steps per episode.
             backend: Physics backend ('generalized', 'spring', 'positional', 'mjx').
         """
-        self._plane_point = jp.array(plane_point, dtype=jp.float32)
-        normal = jp.array(plane_normal, dtype=jp.float32)
-        normal_norm = float(jp.linalg.norm(normal))
+        plane_point = np.asarray(plane_point, dtype=np.float64)
+        plane_normal = np.asarray(plane_normal, dtype=np.float64)
+        normal_norm = np.linalg.norm(plane_normal)
         if normal_norm == 0.0:
             raise ValueError('plane_normal must be a non-zero vector.')
-        self._plane_normal = normal / normal_norm
+        plane_normal = plane_normal / normal_norm
         self._plane_cost_weight = plane_cost_weight
+        # Neither side is special, so tilting past 90 only repeats smaller tilts
+        if not 0.0 <= plane_tilt_range <= 90.0:
+            raise ValueError('plane_tilt_range must be in [0, 90] degrees.')
+        self._plane_tilt_range = jp.deg2rad(plane_tilt_range)
         if platform_radius <= 0.0:
             raise ValueError('platform_radius must be positive.')
         self._platform_radius = platform_radius
@@ -140,13 +135,19 @@ class SafeDodge(PipelineEnv, ABC):
         # Use default healthy z range if not provided
         if healthy_z_range is None:
             healthy_z_range = self.default_healthy_z_range
+        if healthy_z_range[0] >= self.default_spawn_height:
+            raise ValueError('healthy_z_range min must be below the spawn height.')
 
-        # Load XML and place the hazard plane's visual
+        # Load XML and place the hazard plane and platform
         path = epath.resource_path('crax') / self.agent_xml_path
         xml_string = path.read_text()
-        xml_string = xml_string.replace('PLANE_POS', ' '.join(str(float(v)) for v in self._plane_point))
-        xml_string = xml_string.replace('PLANE_NORMAL', ' '.join(str(float(v)) for v in self._plane_normal))
+        xml_string = xml_string.replace('PLANE_POS', ' '.join(str(v) for v in plane_point))
+        xml_string = xml_string.replace('PLANE_NORMAL', ' '.join(str(v) for v in plane_normal))
         xml_string = xml_string.replace('PLATFORM_RADIUS', str(float(platform_radius)))
+        # Visual size only (the cost treats the plane as infinite): big enough that, at any
+        # tilt, it reaches from its centre down to the platform's edge
+        plane_half_size = np.hypot(platform_radius + np.linalg.norm(plane_point[:2]), plane_point[2])
+        xml_string = xml_string.replace('PLANE_HALF_SIZE', str(plane_half_size))
 
         # Parse the modified XML
         sys = mjcf.loads(xml_string)
@@ -179,6 +180,36 @@ class SafeDodge(PipelineEnv, ABC):
         self._healthy_z_range = healthy_z_range
         self._reset_noise_scale = reset_noise_scale
 
+        # Where the plane's tilt lives in the physics state (brax link i = MuJoCo body i + 1)
+        mj_model = self.sys.mj_model
+        self._plane_link = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, 'hazard_plane') - 1
+        tilt_joints = [mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_JOINT, name)
+                       for name in ('plane_tilt_x', 'plane_tilt_y')]
+        self._plane_tilt_q = jp.array(mj_model.jnt_qposadr[tilt_joints])
+        self._plane_tilt_qd = jp.array(mj_model.jnt_dofadr[tilt_joints])
+
+        # The agent's own slice of the physics state: everything but the plane
+        self._agent_q = jp.array(np.setdiff1d(np.arange(self.sys.q_size()), mj_model.jnt_qposadr[tilt_joints]))
+        self._agent_qd = jp.array(np.setdiff1d(np.arange(self.sys.qd_size()), mj_model.jnt_dofadr[tilt_joints]))
+        self._agent_links = jp.array([i for i in range(self.sys.num_links()) if i != self._plane_link])
+
+        # Every body part of the agent (each geom, a sphere or capsule) counts for the plane cost
+        plane_body = self._plane_link + 1
+        part_ids = np.array([g for g in range(mj_model.ngeom)
+                             if mj_model.geom_bodyid[g] not in (0, plane_body)])
+        part_types = mj_model.geom_type[part_ids]
+        sphere, capsule = int(mujoco.mjtGeom.mjGEOM_SPHERE), int(mujoco.mjtGeom.mjGEOM_CAPSULE)
+        if not np.all((part_types == sphere) | (part_types == capsule)):
+            raise ValueError('SafeDodge agents may only use sphere and capsule geoms.')
+        self._part_link = jp.array(mj_model.geom_bodyid[part_ids] - 1)
+        self._part_pos = jp.array(mj_model.geom_pos[part_ids])
+        # A capsule's axis is its geom's local z; a sphere gets half-length 0
+        self._part_axis = jax.vmap(brax_math.rotate, in_axes=(None, 0))(
+            jp.array([0.0, 0.0, 1.0]), jp.array(mj_model.geom_quat[part_ids]))
+        self._part_radius = jp.array(mj_model.geom_size[part_ids, 0])
+        self._part_half_length = jp.array(
+            np.where(part_types == capsule, mj_model.geom_size[part_ids, 1], 0.0))
+
     def step(self, state: State, action: jax.Array) -> State:
         """Run one timestep of the environment's dynamics with the plane constraint."""
         # Scale action from [-1,1] to actuator limits
@@ -202,8 +233,10 @@ class SafeDodge(PipelineEnv, ABC):
         else:
             healthy_reward = self._healthy_reward * is_healthy
 
-        # Height reward: pulls against the plane constraint
-        height_reward = self._height_reward_weight * pipeline_state.x.pos[0, 2]
+        # Height reward, pulls against ducking under the plane: 0 at the fall height,
+        # full weight when the torso is as high as at spawn (standing upright)
+        standing = (pipeline_state.x.pos[0, 2] - min_z) / (self.default_spawn_height - min_z)
+        height_reward = self._height_reward_weight * jp.clip(standing, 0.0, 1.0)
 
         # Control cost
         ctrl_cost = self._ctrl_cost_weight * jp.sum(jp.square(action))
@@ -230,7 +263,7 @@ class SafeDodge(PipelineEnv, ABC):
 
     def reset(self, rng: jax.Array) -> State:
         """Resets the environment to an initial state."""
-        rng1, rng2 = jax.random.split(rng)
+        rng1, rng2, rng3 = jax.random.split(rng, 3)
 
         low, hi = -self._reset_noise_scale, self._reset_noise_scale
         qpos = self.sys.init_q + jax.random.uniform(
@@ -249,6 +282,10 @@ class SafeDodge(PipelineEnv, ABC):
             rng2, (self.sys.qd_size(),), minval=low, maxval=hi
         )
 
+        # New random plane tilt for this episode; the plane starts (and stays) still
+        qpos = qpos.at[self._plane_tilt_q].set(self._sample_plane_tilt(rng3))
+        qvel = qvel.at[self._plane_tilt_qd].set(0.0)
+
         pipeline_state = self.pipeline_init(qpos, qvel)
         obs = self._get_obs(pipeline_state, jp.zeros(self.sys.act_size()))
         reward, done, zero = jp.zeros(3)
@@ -261,10 +298,18 @@ class SafeDodge(PipelineEnv, ABC):
 
         return State(pipeline_state, obs, reward, done, metrics, info)
 
+    def _sample_plane_tilt(self, rng: jax.Array) -> jax.Array:
+        """Plane tilt [about x, about y] in radians for a new episode.
+
+        The single place that decides how the plane is randomized; edit freely.
+        """
+        r = self._plane_tilt_range
+        return jax.random.uniform(rng, (2,), minval=-r, maxval=r)
+
     # Spinning "bullet time" camera, made at render time (not an MJCF camera)
     ORBIT_CAMERA = 'orbit'
     _ORBIT_DISTANCE = 4.0  # metres from the spawn spot
-    _ORBIT_HEIGHT = 0.9  # look-at height, below the plane at every level
+    _ORBIT_HEIGHT = 0.9  # look-at height, about the humanoid's middle
     _ORBIT_ELEVATION = 0.0  # degrees; negative looks down
     _ORBIT_SPEED = 30.0  # degrees per simulated second (one lap = 12 s)
 
@@ -304,31 +349,43 @@ class SafeDodge(PipelineEnv, ABC):
         renderer.close()
         return frames
 
-    def _get_head_center(self, pipeline_state: base.State) -> jax.Array:
-        """World position [x, y, z] of the centre of the agent's head."""
-        torso_pos = pipeline_state.x.pos[0]
-        torso_rot = pipeline_state.x.rot[0]
-        head_offset_world = brax_math.rotate(self.head_local_offset, torso_rot)
-        return torso_pos + head_offset_world
+    def _plane_frame(self, pipeline_state: base.State) -> Tuple[jax.Array, jax.Array]:
+        """Current plane centre and unit normal in world coordinates, tilt included."""
+        # The plane body's z axis is the normal
+        plane_pos = pipeline_state.x.pos[self._plane_link]
+        normal = brax_math.rotate(jp.array([0.0, 0.0, 1.0]), pipeline_state.x.rot[self._plane_link])
+        return plane_pos, normal
 
-    def _plane_distance(self, point: jax.Array, radius: float = 0.0) -> jax.Array:
-        """Signed distance of a sphere to the hazard plane.
+    def _part_overlaps(self, pipeline_state: base.State) -> jax.Array:
+        """How deep each body part's hitbox (sphere or capsule) cuts into the plane, in metres.
 
-        > 0: the sphere reaches that far into the forbidden side.
-        <= 0: fully on the safe side.
+        > 0: the hitbox intersects the plane by that much.
+        <= 0: no contact; minus the gap to the plane. Neither side is special.
         """
-        return jp.dot(point - self._plane_point, self._plane_normal) + radius
+        plane_pos, normal = self._plane_frame(pipeline_state)
+        rotate = jax.vmap(brax_math.rotate)
+        link_rot = pipeline_state.x.rot[self._part_link]
+        center = pipeline_state.x.pos[self._part_link] + rotate(self._part_pos, link_rot)
+        axis = rotate(self._part_axis, link_rot)
+        # How far the hitbox extends along the normal from its centre, either way
+        reach = self._part_half_length * jp.abs(axis @ normal) + self._part_radius
+        return reach - jp.abs((center - plane_pos) @ normal)
 
     def _constraint_metrics(self, pipeline_state: base.State) -> dict:
-        """Safety constraint: how far the head reaches past the hazard plane, and its cost."""
-        head_center = self._get_head_center(pipeline_state)
-        plane_distance = self._plane_distance(head_center, self.head_radius)
-        plane_violation = jp.maximum(0.0, plane_distance)
+        """Safety constraint: body-part hitboxes intersecting the hazard plane, and its cost.
+
+        The violation sums the overlap of every part, so the cost grows with how
+        many parts touch and how deep, and passing through costs for every part
+        that crosses.
+        """
+        part_overlaps = self._part_overlaps(pipeline_state)
+        plane_violation = jp.sum(jp.maximum(0.0, part_overlaps))
         plane_cost = self._plane_cost_weight * plane_violation
         return {
-            'head_height': head_center[2] + self.head_radius,
-            'plane_distance': plane_distance,
+            # Deepest overlap of any part; negative = gap between the body and the plane
+            'plane_distance': jp.max(part_overlaps),
             'plane_violation': plane_violation,
+            'plane_parts_touching': jp.sum(part_overlaps > 0.0).astype(jp.float32),
             'plane_cost': plane_cost,
             'cost': plane_cost,
         }
@@ -360,9 +417,10 @@ class SafeDodge(PipelineEnv, ABC):
     def _get_obs(
             self, pipeline_state: base.State, action: jax.Array
     ) -> jax.Array:
-        """Observes body position, velocities, and angles."""
-        position = pipeline_state.q[2:]
-        velocity = pipeline_state.qd
+        """Observes the agent's body, the plane, and the platform."""
+        # Body: the agent's own joints and links only (torso x, y are in the platform block)
+        position = pipeline_state.q[self._agent_q[2:]]
+        velocity = pipeline_state.qd[self._agent_qd]
 
         com, inertia, mass_sum, x_i = self._com(pipeline_state)
         cinr = x_i.replace(pos=x_i.pos - com).vmap().do(inertia)
@@ -370,10 +428,12 @@ class SafeDodge(PipelineEnv, ABC):
             [cinr.i.reshape((cinr.i.shape[0], -1)), inertia.mass[:, None]]
         )
 
+        agent_x = pipeline_state.x.take(self._agent_links)
+        agent_xd = pipeline_state.xd.take(self._agent_links)
         xd_i = (
-            base.Transform.create(pos=x_i.pos - pipeline_state.x.pos)
+            base.Transform.create(pos=x_i.pos - agent_x.pos)
             .vmap()
-            .do(pipeline_state.xd)
+            .do(agent_xd)
         )
         com_vel = inertia.mass[:, None] * xd_i.vel / mass_sum
         com_ang = xd_i.ang
@@ -381,7 +441,7 @@ class SafeDodge(PipelineEnv, ABC):
 
         qfrc_actuator = actuator.to_tau(
             self.sys, action, pipeline_state.q, pipeline_state.qd
-        )
+        )[self._agent_qd]
 
         # external_contact_forces are excluded
         return jp.concatenate([
@@ -390,13 +450,42 @@ class SafeDodge(PipelineEnv, ABC):
             com_inertia.ravel(),
             com_velocity.ravel(),
             qfrc_actuator,
+            self._plane_obs(pipeline_state),
+            self._platform_obs(pipeline_state),
         ])
+
+    def _plane_obs(self, pipeline_state: base.State) -> jax.Array:
+        """Where the plane is and how it moves, as seen from the torso (13 values).
+
+        [plane centre - torso (3), unit normal (3), torso distance to the plane (1),
+        plane linear velocity (3), plane angular velocity (3)]. Neither side is
+        special, so the normal is flipped to point from the plane toward the torso
+        and the distance is >= 0. The velocities are 0 until the plane moves.
+        """
+        plane_pos, normal = self._plane_frame(pipeline_state)
+        offset = plane_pos - pipeline_state.x.pos[0]
+        normal = jp.where(jp.dot(-offset, normal) >= 0.0, 1.0, -1.0) * normal
+        plane_xd = pipeline_state.xd.take(self._plane_link)
+        return jp.concatenate([
+            offset, normal, jp.dot(-offset, normal)[None], plane_xd.vel, plane_xd.ang,
+        ])
+
+    def _platform_obs(self, pipeline_state: base.State) -> jax.Array:
+        """Where the torso is on the platform (4 values).
+
+        [torso x, y relative to the platform centre (2), platform radius (1),
+        distance from the torso to the edge (1)]. The edge distance is what
+        matters most when the platform is small.
+        """
+        torso_xy = pipeline_state.x.pos[0, :2]
+        edge_distance = self._platform_radius - jp.linalg.norm(torso_xy)
+        return jp.concatenate([torso_xy, jp.array([self._platform_radius, edge_distance])])
 
     def _com(
             self, pipeline_state: base.State
     ) -> Tuple[jax.Array, base.Inertia, jax.Array, base.Transform]:
-        """Calculate center of mass."""
-        inertia = self.sys.link.inertia
+        """Calculate the agent's center of mass (the plane is left out)."""
+        inertia = jax.tree.map(lambda a: a[self._agent_links], self.sys.link.inertia)
         if self.backend in ['spring', 'positional']:
             inertia = inertia.replace(
                 i=jax.vmap(jp.diag)(
@@ -406,7 +495,7 @@ class SafeDodge(PipelineEnv, ABC):
                 mass=inertia.mass ** (1 - self.sys.spring_mass_scale),
             )
         mass_sum = jp.sum(inertia.mass)
-        x_i = pipeline_state.x.vmap().do(inertia.transform)
+        x_i = pipeline_state.x.take(self._agent_links).vmap().do(inertia.transform)
         com = (
             jp.sum(jax.vmap(jp.multiply)(inertia.mass, x_i.pos), axis=0) / mass_sum
         )
@@ -416,21 +505,13 @@ class SafeDodge(PipelineEnv, ABC):
 class SafeDodgeHumanoid(SafeDodge):
     """Humanoid environment with a hazard plane.
 
-    The humanoid must stay healthy while keeping its head on the safe side of
-    the hazard plane, forcing it to learn to crouch or lean away.
+    The humanoid must stay healthy while keeping its body parts from
+    intersecting the hazard plane, forcing it to learn to crouch or lean away.
     """
 
     @property
     def agent_xml_path(self) -> str:
         return 'envs/assets/safe/humanoid_dodge.xml'
-
-    @property
-    def head_local_offset(self) -> jp.ndarray:
-        return jp.array([-0.15, 0.0, 0.0])
-
-    @property
-    def head_radius(self) -> float:
-        return 0.09
 
     @property
     def default_spawn_height(self) -> float:

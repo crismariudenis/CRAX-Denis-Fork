@@ -1,4 +1,4 @@
-<mujoco model="humanoid_height">
+<mujoco model="humanoid_dodge">
     <compiler angle="degree" inertiafromgeom="true"/>
     <default>
         <joint armature="1" damping="1" limited="true"/>
@@ -34,8 +34,6 @@
         <material name="MatPlane" reflectance="0.18" shininess="0.1" specular="0.1" texrepeat="60 60" texture="texplane"/>
         <material name="MatPlatform" reflectance="0.18" shininess="0.1" specular="0.1" texrepeat="1.5 1.5" texuniform="true" texture="texplane"/>
         <material name="geom" texture="texgeom" texuniform="true"/>
-        <!-- Transparent red material for the height boundary ceiling -->
-        <material name="height_boundary_mat" rgba="1.0 0.2 0.2 0.3"/>
     </asset>
     <worldbody>
         <!-- castshadow off: MuJoCo has no per-geom shadow flag, so this is the only way to stop the hazard plane shading the floor -->
@@ -47,17 +45,10 @@
         <geom name="platform" type="cylinder" pos="0 0 -0.05" size="PLATFORM_RADIUS 0.05" material="MatPlatform"
               contype="0" conaffinity="0"/>
         <camera name="fixedfar" pos="0 -5 5" zaxis="0 -1 1" mode="fixed"/>
-        <!-- Eye-level video cameras, fixed in the world. z=0.9 sits below the plane at every
-             level (1.0-1.2), so the plane shows edge-on just above the head. The humanoid faces +x. -->
+        <!-- Eye-level video cameras, fixed in the world. The humanoid faces +x. -->
         <camera name="front" pos="4 0 0.9" xyaxes="0 1 0 0 0 1" mode="fixed"/>
         <camera name="side" pos="0 -4 0.9" xyaxes="1 0 0 0 0 1" mode="fixed"/>
         <!-- "orbit" (spinning bullet-time camera) is not defined here: SafeDodge.render() drives it -->
-
-        <!-- Hazard plane (visual only, no collision, no shadows) -->
-        <!-- PLANE_POS / PLANE_NORMAL are replaced at load time from plane_point / plane_normal -->
-        <!-- zaxis points the box's thin side along the plane normal, so the box tilts with the plane -->
-        <geom name="hazard_plane" type="box" pos="PLANE_POS" zaxis="PLANE_NORMAL" size="3.0 3.0 0.002"
-              rgba="1.0 0.2 0.2 0.4" contype="0" conaffinity="0" group="2"/>
 
         <body name="torso" pos="0 0 0.15">
             <site name="agent" rgba="1 0 0 .1"/>
@@ -127,6 +118,20 @@
                     <geom name="left_hand" pos=".18 -.18 .18" size="0.04" type="sphere"/>
                 </body>
             </body>
+        </body>
+
+        <!-- Hazard plane (visual only, no collision, no shadows). It must come after the humanoid so
+             the torso stays link 0 and its free joint stays first in qpos.
+             PLANE_POS / PLANE_NORMAL are replaced at load time from plane_point / plane_normal; zaxis
+             points the box's thin side along the untilted normal.
+             The two hinges tilt the plane; SafeDodge.reset sets them each episode. Its mass sits on the
+             hinges and is tiny, so the plane never moves on its own and doesn't shift the agent's COM. -->
+        <body name="hazard_plane" pos="PLANE_POS" zaxis="PLANE_NORMAL">
+            <joint name="plane_tilt_x" type="hinge" axis="1 0 0" limited="false"/>
+            <joint name="plane_tilt_y" type="hinge" axis="0 1 0" limited="false"/>
+            <!-- PLANE_HALF_SIZE is set at load time so the plane reaches the platform at any tilt -->
+            <geom name="hazard_plane" type="box" size="PLANE_HALF_SIZE PLANE_HALF_SIZE 0.002" mass="0.001"
+                  rgba="1.0 0.2 0.2 0.4" contype="0" conaffinity="0" group="2"/>
         </body>
     </worldbody>
     <sensor>
