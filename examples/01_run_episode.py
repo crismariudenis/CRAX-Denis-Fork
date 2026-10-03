@@ -30,6 +30,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--level", type=int, default=1, choices=[1, 2, 3],
                    help="Difficulty level")
     p.add_argument("--steps", type=int, default=300, help="Max steps in the episode")
+    p.add_argument("--reset_on_done", action="store_true",
+                   help="When the episode ends (e.g. a fall), reset and keep recording until --steps")
     p.add_argument("--seed", type=int, default=0, help="Random seed")
     p.add_argument("--camera", type=str, default=None,
                    help="Camera name to render from (default: the env's default camera)")
@@ -99,7 +101,10 @@ def main() -> None:
         costs.append(total_cost)
 
         if bool(state.done):
-            break
+            if not args.reset_on_done:
+                break
+            rng, reset_rng = jax.random.split(rng)
+            state = reset_fn(reset_rng)
 
     print(f"episode finished: steps={len(trajectory) - 1} "
           f"return={total_reward:.2f} cost={total_cost:.2f}")

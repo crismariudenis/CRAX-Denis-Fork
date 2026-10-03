@@ -22,10 +22,11 @@ added on top of this.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
+from typing import List, Optional, Sequence, Tuple, Union
 
 import jax
 import mujoco
+import numpy as np
 from jax import numpy as jp
 from etils import epath
 
@@ -94,6 +95,7 @@ class SafeDodge(PipelineEnv, ABC):
             self,
             ctrl_cost_weight=0.1,
             healthy_reward=5.0,
+            height_reward_weight: float = 1.0,
             terminate_when_unhealthy=True,
             healthy_z_range: Optional[Tuple[float, float]] = None,
             reset_noise_scale=1e-2,
@@ -109,6 +111,8 @@ class SafeDodge(PipelineEnv, ABC):
         Args:
             ctrl_cost_weight: Weight for control cost penalty.
             healthy_reward: Reward for staying healthy (alive).
+            height_reward_weight: Reward per metre of torso height. Standing tall
+                pays more, which conflicts with ducking under the plane.
             terminate_when_unhealthy: Whether to terminate episode when unhealthy.
             healthy_z_range: (min, max) z-range for healthy state.
             reset_noise_scale: Scale of noise added to initial state.
@@ -163,6 +167,7 @@ class SafeDodge(PipelineEnv, ABC):
         self.episode_length = episode_length
         self._ctrl_cost_weight = ctrl_cost_weight
         self._healthy_reward = healthy_reward
+        self._height_reward_weight = height_reward_weight
         self._terminate_when_unhealthy = terminate_when_unhealthy
         self._healthy_z_range = healthy_z_range
         self._reset_noise_scale = reset_noise_scale
@@ -187,17 +192,21 @@ class SafeDodge(PipelineEnv, ABC):
         else:
             healthy_reward = self._healthy_reward * is_healthy
 
+        # Height reward: pulls against the plane constraint
+        height_reward = self._height_reward_weight * pipeline_state.x.pos[0, 2]
+
         # Control cost
         ctrl_cost = self._ctrl_cost_weight * jp.sum(jp.square(action))
 
         obs = self._get_obs(pipeline_state, action)
 
         # Reward structure
-        reward = healthy_reward - ctrl_cost
+        reward = healthy_reward + height_reward - ctrl_cost
         done = 1.0 - is_healthy if self._terminate_when_unhealthy else 0.0
 
         # Update metrics
-        metrics = self._metrics(pipeline_state0, pipeline_state, healthy_reward, ctrl_cost)
+        metrics = self._metrics(
+            pipeline_state0, pipeline_state, healthy_reward, height_reward, ctrl_cost)
         state.metrics.update(metrics)
 
         # Update info dictionary with cost
@@ -236,11 +245,54 @@ class SafeDodge(PipelineEnv, ABC):
 
         # Same keys as step() produces, all zero
         metrics = jax.tree_util.tree_map(
-            jp.zeros_like, self._metrics(pipeline_state, pipeline_state, zero, zero))
+            jp.zeros_like, self._metrics(pipeline_state, pipeline_state, zero, zero, zero))
         info = {k: metrics[k] for k in self._INFO_KEYS}
         info["step_count"] = 0
 
         return State(pipeline_state, obs, reward, done, metrics, info)
+
+    # Spinning "bullet time" camera, made at render time (not an MJCF camera)
+    ORBIT_CAMERA = 'orbit'
+    _ORBIT_DISTANCE = 4.0  # metres from the spawn spot
+    _ORBIT_HEIGHT = 0.9  # look-at height, below the plane at every level
+    _ORBIT_ELEVATION = 0.0  # degrees; negative looks down
+    _ORBIT_SPEED = 30.0  # degrees per simulated second (one lap = 12 s)
+
+    def render(
+            self,
+            trajectory: Union[List[base.State], base.State],
+            height: int = 240,
+            width: int = 320,
+            camera: Optional[str] = None,
+    ) -> Union[Sequence[np.ndarray], np.ndarray]:
+        """Renders a trajectory; camera='orbit' circles the agent like bullet time."""
+        if camera != self.ORBIT_CAMERA:
+            return super().render(trajectory, height=height, width=width, camera=camera)
+
+        mj_model = self.sys.mj_model
+        renderer = mujoco.Renderer(mj_model, height=height, width=width)
+        d = mujoco.MjData(mj_model)
+        cam = mujoco.MjvCamera()
+        cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+        cam.distance = self._ORBIT_DISTANCE
+        cam.elevation = self._ORBIT_ELEVATION
+        # Circle a fixed point above the spawn spot. Following the torso made
+        # the camera slide during falls and snap back on every reset.
+        cam.lookat[:] = [0.0, 0.0, self._ORBIT_HEIGHT]
+
+        def get_image(i: int, state: base.State) -> np.ndarray:
+            d.qpos, d.qvel = state.q, state.qd
+            mujoco.mj_forward(mj_model, d)
+            cam.azimuth = self._ORBIT_SPEED * i * self.dt
+            renderer.update_scene(d, camera=cam)
+            return renderer.render()
+
+        if isinstance(trajectory, list):
+            frames = [get_image(i, s) for i, s in enumerate(trajectory)]
+        else:
+            frames = get_image(0, trajectory)
+        renderer.close()
+        return frames
 
     def _get_head_center(self, pipeline_state: base.State) -> jax.Array:
         """World position [x, y, z] of the centre of the agent's head."""
@@ -276,7 +328,7 @@ class SafeDodge(PipelineEnv, ABC):
 
     def _metrics(
             self, pipeline_state0: base.State, pipeline_state: base.State,
-            healthy_reward: jax.Array, ctrl_cost: jax.Array,
+            healthy_reward: jax.Array, height_reward: jax.Array, ctrl_cost: jax.Array,
     ) -> dict:
         """All per-step metrics. The single source of the metric keys for step() and reset()."""
         # Center-of-mass position and velocity (logged only, not rewarded)
@@ -286,6 +338,7 @@ class SafeDodge(PipelineEnv, ABC):
         return {
             'reward_quadctrl': -ctrl_cost,
             'reward_alive': healthy_reward,
+            'reward_height': height_reward,
             'x_position': com_after[0],
             'y_position': com_after[1],
             'distance_from_origin': jp.linalg.norm(com_after),
