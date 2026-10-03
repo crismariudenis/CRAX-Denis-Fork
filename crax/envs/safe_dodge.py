@@ -102,6 +102,7 @@ class SafeDodge(PipelineEnv, ABC):
             plane_point: Tuple[float, float, float] = (0.0, 0.0, 1.2),
             plane_normal: Tuple[float, float, float] = (0.0, 0.0, 1.0),
             plane_cost_weight: float = 1.25,
+            platform_radius: float = 1.5,
             episode_length: int = 1000,
             backend: str = 'generalized',
             **kwargs,
@@ -120,6 +121,8 @@ class SafeDodge(PipelineEnv, ABC):
             plane_normal: Normal [x, y, z] of the hazard plane, pointing to the
                 forbidden side. Normalized internally. [0, 0, 1] is a ceiling.
             plane_cost_weight: Cost per metre the head reaches past the plane.
+            platform_radius: Radius in metres of the round platform the agent
+                stands on, centred on the origin. The torso leaving it counts as a fall.
             episode_length: Maximum number of steps per episode.
             backend: Physics backend ('generalized', 'spring', 'positional', 'mjx').
         """
@@ -130,6 +133,9 @@ class SafeDodge(PipelineEnv, ABC):
             raise ValueError('plane_normal must be a non-zero vector.')
         self._plane_normal = normal / normal_norm
         self._plane_cost_weight = plane_cost_weight
+        if platform_radius <= 0.0:
+            raise ValueError('platform_radius must be positive.')
+        self._platform_radius = platform_radius
 
         # Use default healthy z range if not provided
         if healthy_z_range is None:
@@ -140,6 +146,7 @@ class SafeDodge(PipelineEnv, ABC):
         xml_string = path.read_text()
         xml_string = xml_string.replace('PLANE_POS', ' '.join(str(float(v)) for v in self._plane_point))
         xml_string = xml_string.replace('PLANE_NORMAL', ' '.join(str(float(v)) for v in self._plane_normal))
+        xml_string = xml_string.replace('PLATFORM_RADIUS', str(float(platform_radius)))
 
         # Parse the modified XML
         sys = mjcf.loads(xml_string)
@@ -187,6 +194,9 @@ class SafeDodge(PipelineEnv, ABC):
         min_z, max_z = self._healthy_z_range
         is_healthy = jp.where(pipeline_state.x.pos[0, 2] < min_z, 0.0, 1.0)
         is_healthy = jp.where(pipeline_state.x.pos[0, 2] > max_z, 0.0, is_healthy)
+        # Torso off the edge of the round platform counts as a fall
+        torso_radius = jp.linalg.norm(pipeline_state.x.pos[0, :2])
+        is_healthy = jp.where(torso_radius > self._platform_radius, 0.0, is_healthy)
         if self._terminate_when_unhealthy:
             healthy_reward = self._healthy_reward
         else:

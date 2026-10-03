@@ -32,6 +32,7 @@
         <texture builtin="flat" height="1278" mark="cross" markrgb="1 1 1" name="texgeom" random="0.01" rgb1="0.8 0.6 0.4" rgb2="0.8 0.6 0.4" type="cube" width="30"/>
         <texture builtin="checker" height="100" name="texplane" rgb1="0.70 0.74 0.70" rgb2="0.64 0.68 0.64" type="2d" width="100"/>
         <material name="MatPlane" reflectance="0.18" shininess="0.1" specular="0.1" texrepeat="60 60" texture="texplane"/>
+        <material name="MatPlatform" reflectance="0.18" shininess="0.1" specular="0.1" texrepeat="1.5 1.5" texuniform="true" texture="texplane"/>
         <material name="geom" texture="texgeom" texuniform="true"/>
         <!-- Transparent red material for the height boundary ceiling -->
         <material name="height_boundary_mat" rgba="1.0 0.2 0.2 0.3"/>
@@ -39,7 +40,12 @@
     <worldbody>
         <!-- castshadow off: MuJoCo has no per-geom shadow flag, so this is the only way to stop the hazard plane shading the floor -->
         <light cutoff="100" diffuse="1 1 1" dir="-0 0 -1.3" directional="true" exponent="1" pos="0 0 1.3" specular=".1 .1 .1" castshadow="false"/>
-        <geom conaffinity="1" condim="3" friction="1 .1 .1" material="MatPlane" name="floor" pos="0 0 0" size="20 20 0.125" type="plane"/>
+        <!-- The agent stands on a round platform. Brax can't collide with thick cylinders, so the
+             infinite floor does the colliding but is hidden (group 3), and the platform is visual only.
+             Leaving the platform is a fall (see SafeDodge.step). PLATFORM_RADIUS is replaced at load time. -->
+        <geom conaffinity="1" condim="3" friction="1 .1 .1" material="MatPlane" name="floor" pos="0 0 0" size="20 20 0.125" type="plane" group="3"/>
+        <geom name="platform" type="cylinder" pos="0 0 -0.05" size="PLATFORM_RADIUS 0.05" material="MatPlatform"
+              contype="0" conaffinity="0"/>
         <camera name="fixedfar" pos="0 -5 5" zaxis="0 -1 1" mode="fixed"/>
         <!-- Eye-level video cameras, fixed in the world. z=0.9 sits below the plane at every
              level (1.0-1.2), so the plane shows edge-on just above the head. The humanoid faces +x. -->
@@ -50,7 +56,7 @@
         <!-- Hazard plane (visual only, no collision, no shadows) -->
         <!-- PLANE_POS / PLANE_NORMAL are replaced at load time from plane_point / plane_normal -->
         <!-- zaxis points the box's thin side along the plane normal, so the box tilts with the plane -->
-        <geom name="hazard_plane" type="box" pos="PLANE_POS" zaxis="PLANE_NORMAL" size="3.0 3.0 0.01"
+        <geom name="hazard_plane" type="box" pos="PLANE_POS" zaxis="PLANE_NORMAL" size="3.0 3.0 0.002"
               rgba="1.0 0.2 0.2 0.4" contype="0" conaffinity="0" group="2"/>
 
         <body name="torso" pos="0 0 0.15">
