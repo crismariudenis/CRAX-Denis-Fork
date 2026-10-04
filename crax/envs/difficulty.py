@@ -151,12 +151,13 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
         3: {"max_height": 1.00},
     },
 
-    # Dodge task - keep the head on the safe side of a hazard plane (crax/envs/safe_dodge.py).
-    # plane_normal points to the forbidden side; [0, 0, 1] is a ceiling at plane_point's height.
+    # Dodge task - keep every body part out of a randomly tilted hazard plane (crax/envs/safe_dodge.py).
+    # Level 1: no plane (hidden, cost 0), only learn to stand on the platform.
+    # Level 2: still plane. Level 3: the plane slides through the platform (passes the centre after 7.5 s).
     "dodge": {
-        1: {"plane_point": [0.0, 0.0, 1.20], "plane_normal": [0.0, 0.0, 1.0]},
-        2: {"plane_point": [0.0, 0.0, 1.10], "plane_normal": [0.0, 0.0, 1.0]},
-        3: {"plane_point": [0.0, 0.0, 1.00], "plane_normal": [0.0, 0.0, 1.0]},
+        1: {"plane_enabled": False},
+        2: {"plane_enabled": True},
+        3: {"plane_enabled": True, "plane_slide_speed": 0.2, "plane_slide_distance": 1.5},
     },
 
     # Lift task for Ant - keep certain feet off the ground

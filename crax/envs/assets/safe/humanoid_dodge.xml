@@ -124,14 +124,22 @@
              the torso stays link 0 and its free joint stays first in qpos.
              PLANE_POS / PLANE_NORMAL are replaced at load time from plane_point / plane_normal; zaxis
              points the box's thin side along the untilted normal.
-             The two hinges tilt the plane; SafeDodge.reset sets them each episode. Its mass sits on the
-             hinges and is tiny, so the plane never moves on its own and doesn't shift the agent's COM. -->
-        <body name="hazard_plane" pos="PLANE_POS" zaxis="PLANE_NORMAL">
-            <joint name="plane_tilt_x" type="hinge" axis="1 0 0" limited="false"/>
-            <joint name="plane_tilt_y" type="hinge" axis="0 1 0" limited="false"/>
-            <!-- PLANE_HALF_SIZE is set at load time so the plane reaches the platform at any tilt -->
-            <geom name="hazard_plane" type="box" size="PLANE_HALF_SIZE PLANE_HALF_SIZE 0.002" mass="0.001"
-                  rgba="1.0 0.2 0.2 0.4" contype="0" conaffinity="0" group="2"/>
+             The outer body slides the plane in world x, y (horizontal, so gravity never acts on it);
+             SafeDodge.reset sets its start offset and constant velocity each episode. No damping, so it
+             keeps that velocity. The two hinges tilt the plane; reset sets them too. Both masses sit on
+             the joints and are tiny, so the plane never moves on its own and doesn't shift the agent's COM. -->
+        <body name="plane_slider" pos="PLANE_POS">
+            <joint name="plane_slide_x" type="slide" axis="1 0 0" limited="false" armature="0" damping="0"/>
+            <joint name="plane_slide_y" type="slide" axis="0 1 0" limited="false" armature="0" damping="0"/>
+            <inertial pos="0 0 0" mass="0.001" diaginertia="1e-6 1e-6 1e-6"/>
+            <body name="hazard_plane" zaxis="PLANE_NORMAL">
+                <joint name="plane_tilt_x" type="hinge" axis="1 0 0" limited="false"/>
+                <joint name="plane_tilt_y" type="hinge" axis="0 1 0" limited="false"/>
+                <!-- PLANE_HALF_SIZE is set at load time so the unslid plane reaches the platform at any
+                     tilt. PLANE_GROUP is 3 (hidden) when the plane is disabled -->
+                <geom name="hazard_plane" type="box" size="PLANE_HALF_SIZE PLANE_HALF_SIZE 0.002" mass="0.001"
+                      rgba="1.0 0.2 0.2 0.4" contype="0" conaffinity="0" group="PLANE_GROUP"/>
+            </body>
         </body>
     </worldbody>
     <sensor>
