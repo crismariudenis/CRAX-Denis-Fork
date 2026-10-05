@@ -10,6 +10,7 @@ Usage:
     python scripts/dodge_policy_videos.py                       # newest curriculum run, level 3
     python scripts/dodge_policy_videos.py --levels 1 2 3        # one set of videos per level
     python scripts/dodge_policy_videos.py --run models/<run_name> --steps 1000
+    python scripts/dodge_policy_videos.py --stage 1 --levels 1  # stage 1's policy instead of the last
     python scripts/dodge_policy_videos.py --runs_dir models/<folder>   # every run in a folder (e.g. all seeds)
 """
 import argparse
@@ -45,6 +46,8 @@ def parse_args() -> argparse.Namespace:
                    help=f"Record every {ENV_NAME}_curriculum_* run in this folder instead (e.g. one per seed)")
     p.add_argument("--levels", type=int, nargs="+", default=[3], choices=[1, 2, 3],
                    help="Levels to record the policy on, one set of videos each")
+    p.add_argument("--stage", type=int, default=None,
+                   help="Curriculum stage whose policy to record (default: the last stage)")
     p.add_argument("--steps", type=int, default=1000,
                    help="Video length in env steps (one step = 0.015 s, so 1000 = 15 s)")
     p.add_argument("--cameras", type=str, nargs="+", default=["front", "side", "orbit"])
@@ -67,8 +70,20 @@ def find_runs(run: str | None, runs_dir: str | None) -> list[Path]:
     return runs if runs_dir is not None else runs[-1:]
 
 
-def latest_checkpoint(run_dir: Path) -> Path:
-    """The checkpoint with the highest step (folders are zero-padded step numbers)."""
+def latest_checkpoint(run_dir: Path, stage: int | None) -> Path:
+    """The checkpoint with the highest step (folders are zero-padded step numbers).
+
+    Curriculum runs keep one stage_<n> subfolder per stage; this picks the given
+    stage, or the last one. Older runs without stage folders are read directly.
+    """
+    stage_dirs = sorted((p for p in run_dir.glob("stage_*") if p.name[6:].isdigit()),
+                        key=lambda p: int(p.name[6:]))
+    if stage is not None:
+        run_dir = run_dir / f"stage_{stage}"
+        if not run_dir.is_dir():
+            raise FileNotFoundError(f"No {run_dir.name} in {run_dir.parent}.")
+    elif stage_dirs:
+        run_dir = stage_dirs[-1]
     steps = sorted(p for p in run_dir.iterdir() if p.is_dir() and p.name.isdigit())
     if not steps:
         raise FileNotFoundError(f"No checkpoints in {run_dir}.")
@@ -134,11 +149,13 @@ def record_level(policy, level: int, args, out_prefix: str) -> None:
 def main() -> None:
     args = parse_args()
     for run_dir in find_runs(args.run, args.runs_dir):
-        ckpt = latest_checkpoint(run_dir)
+        ckpt = latest_checkpoint(run_dir, args.stage)
         print(f"policy: {ckpt}")
         policy = jax.jit(ppo_checkpoint.load_policy(ckpt, deterministic=True))
         # Short name: sd (safe dodge) + a 4-character id of the run, the same every time for one run
         out_prefix = f"sd_{zlib.crc32(run_dir.name.encode()) & 0xFFFF:04x}"
+        if args.stage is not None:
+            out_prefix += f"_stage{args.stage}"
         print(f"video names: {out_prefix}_lvl<level>_<camera>.mp4  (id {out_prefix[3:]} = {run_dir.name})")
         for level in args.levels:
             record_level(policy, level, args, out_prefix=out_prefix)

@@ -87,6 +87,7 @@ class SafeDodge(PipelineEnv, ABC):
             plane_point: Tuple[float, float, float] = (0.0, 0.0, 1.2),
             plane_normal: Tuple[float, float, float] = (0.0, 0.0, 1.0),
             plane_cost_weight: float = 1.25,
+            fall_cost: float = 25.0,
             plane_tilt_range: float = 90.0,
             plane_enabled: bool = True,
             plane_slide_speed: float = 0.0,
@@ -112,6 +113,13 @@ class SafeDodge(PipelineEnv, ABC):
                 orientation only. Normalized internally. [0, 0, 1] is horizontal.
             plane_cost_weight: Cost per metre of hitbox overlap with the plane,
                 summed over all body parts.
+            fall_cost: Cost added on every step the agent is fallen (torso out of
+                healthy_z_range or off the platform), at every level; with
+                terminate_when_unhealthy that is only the final step. Without it,
+                falling on purpose ends the episode and so avoids all further
+                plane cost, which the Lagrangian rewards once the multiplier is
+                large. 25 equals the default --safety_bound, so one fall uses the
+                whole episode's budget.
             plane_tilt_range: Max random tilt of the plane in degrees, per axis,
                 drawn at every reset (see _sample_plane_tilt). 0 keeps it fixed,
                 90 allows a vertical wall.
@@ -136,6 +144,9 @@ class SafeDodge(PipelineEnv, ABC):
             raise ValueError('plane_normal must be a non-zero vector.')
         plane_normal = plane_normal / normal_norm
         self._plane_cost_weight = plane_cost_weight if plane_enabled else 0.0
+        if fall_cost < 0.0:
+            raise ValueError('fall_cost must be >= 0.')
+        self._fall_cost = fall_cost
         # Neither side is special, so tilting past 90 only repeats smaller tilts
         if not 0.0 <= plane_tilt_range <= 90.0:
             raise ValueError('plane_tilt_range must be in [0, 90] degrees.')
@@ -246,12 +257,8 @@ class SafeDodge(PipelineEnv, ABC):
         pipeline_state = self.pipeline_step(pipeline_state0, action)
 
         # Healthy reward
-        min_z, max_z = self._healthy_z_range
-        is_healthy = jp.where(pipeline_state.x.pos[0, 2] < min_z, 0.0, 1.0)
-        is_healthy = jp.where(pipeline_state.x.pos[0, 2] > max_z, 0.0, is_healthy)
-        # Torso off the edge of the round platform counts as a fall
-        torso_radius = jp.linalg.norm(pipeline_state.x.pos[0, :2])
-        is_healthy = jp.where(torso_radius > self._platform_radius, 0.0, is_healthy)
+        min_z, _ = self._healthy_z_range
+        is_healthy = self._is_healthy(pipeline_state)
         if self._terminate_when_unhealthy:
             healthy_reward = self._healthy_reward
         else:
@@ -325,6 +332,15 @@ class SafeDodge(PipelineEnv, ABC):
         info["step_count"] = 0
 
         return State(pipeline_state, obs, reward, done, metrics, info)
+
+    def _is_healthy(self, pipeline_state: base.State) -> jax.Array:
+        """1.0 while standing, 0.0 once fallen: torso out of healthy_z_range or off the platform."""
+        min_z, max_z = self._healthy_z_range
+        torso_z = pipeline_state.x.pos[0, 2]
+        is_healthy = jp.where((torso_z < min_z) | (torso_z > max_z), 0.0, 1.0)
+        # Torso off the edge of the round platform counts as a fall
+        torso_radius = jp.linalg.norm(pipeline_state.x.pos[0, :2])
+        return jp.where(torso_radius > self._platform_radius, 0.0, is_healthy)
 
     def _sample_plane_tilt(self, rng: jax.Array) -> jax.Array:
         """Plane tilt [about x, about y] in radians for a new episode.
@@ -411,26 +427,28 @@ class SafeDodge(PipelineEnv, ABC):
         return reach - jp.abs((center - plane_pos) @ normal)
 
     def _constraint_metrics(self, pipeline_state: base.State) -> dict:
-        """Safety constraint: body-part hitboxes intersecting the hazard plane, and its cost.
+        """Safety constraint: body-part hitboxes intersecting the hazard plane, plus falling.
 
-        The violation sums the overlap of every part, so the cost grows with how
-        many parts touch and how deep, and passing through costs for every part
-        that crosses.
+        The plane violation sums the overlap of every part, so the cost grows with
+        how many parts touch and how deep, and passing through costs for every part
+        that crosses. A fall adds fall_cost once, on the step it happens.
         """
         part_overlaps = self._part_overlaps(pipeline_state)
         plane_violation = jp.sum(jp.maximum(0.0, part_overlaps))
         plane_cost = self._plane_cost_weight * plane_violation
+        fall_cost = self._fall_cost * (1.0 - self._is_healthy(pipeline_state))
         return {
             # Deepest overlap of any part; negative = gap between the body and the plane
             'plane_distance': jp.max(part_overlaps),
             'plane_violation': plane_violation,
             'plane_parts_touching': jp.sum(part_overlaps > 0.0).astype(jp.float32),
             'plane_cost': plane_cost,
-            'cost': plane_cost,
+            'fall_cost': fall_cost,
+            'cost': plane_cost + fall_cost,
         }
 
     # Metrics that are also copied into state.info each step.
-    _INFO_KEYS = ('cost', 'plane_distance', 'plane_violation')
+    _INFO_KEYS = ('cost', 'plane_distance', 'plane_violation', 'fall_cost')
 
     def _metrics(
             self, pipeline_state0: base.State, pipeline_state: base.State,

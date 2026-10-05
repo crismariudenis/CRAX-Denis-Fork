@@ -39,6 +39,7 @@ Example usage:
 """
 
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from crax import envs
@@ -126,6 +127,11 @@ def train_curriculum(
 
         # Remove env_name if present (use 'environment' instead)
         stage_kwargs.pop('env_name', None)
+
+        # Each stage counts its steps from 0, so sharing one folder would overwrite the
+        # earlier stages' checkpoints; give every stage its own subfolder instead
+        if stage_kwargs.get('save_checkpoint_path') is not None:
+            stage_kwargs['save_checkpoint_path'] = Path(stage_kwargs['save_checkpoint_path']) / f'stage_{stage_idx + 1}'
 
         # Warm-start from previous stage's parameters
         if current_params is not None:
