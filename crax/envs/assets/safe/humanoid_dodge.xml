@@ -126,11 +126,15 @@
              points the box's thin side along the untilted normal.
              The outer body slides the plane in world x, y (horizontal, so gravity never acts on it);
              SafeDodge.reset sets its start offset and constant velocity each episode. No damping, so it
-             keeps that velocity. The two hinges tilt the plane; reset sets them too. Both masses sit on
-             the joints and are tiny, so the plane never moves on its own and doesn't shift the agent's COM. -->
+             keeps that velocity. plane_slide_z sets the plane's height; reset puts it at rest. Gravity does
+             pull on it, but its huge armature (virtual inertia) against the 2 g of plane mass makes it sink
+             only ~2e-5 m/s², about 2 mm over a 15 s episode. The two hinges tilt the plane; reset sets them
+             too. Both masses sit on the joints and are tiny, so the plane never moves on its own (beyond
+             that sink) and doesn't shift the agent's COM. -->
         <body name="plane_slider" pos="PLANE_POS">
             <joint name="plane_slide_x" type="slide" axis="1 0 0" limited="false" armature="0" damping="0"/>
             <joint name="plane_slide_y" type="slide" axis="0 1 0" limited="false" armature="0" damping="0"/>
+            <joint name="plane_slide_z" type="slide" axis="0 0 1" limited="false" armature="1000" damping="0"/>
             <inertial pos="0 0 0" mass="0.001" diaginertia="1e-6 1e-6 1e-6"/>
             <body name="hazard_plane" zaxis="PLANE_NORMAL">
                 <joint name="plane_tilt_x" type="hinge" axis="1 0 0" limited="false"/>

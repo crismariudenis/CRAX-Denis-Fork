@@ -155,9 +155,21 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
     # Level 1: no plane (hidden, cost 0), only learn to stand on the platform.
     # Level 2: still plane. Level 3: the plane slides through the platform (passes the centre after 7.5 s).
     "dodge": {
-        1: {"plane_enabled": False},
-        2: {"plane_enabled": True},
-        3: {"plane_enabled": True, "plane_slide_speed": 0.2, "plane_slide_distance": 1.5},
+        # Level 1: stand. No plane, and falls cost nothing: a fall cost here makes the
+        # multiplier large before the agent can stand, and it learns to squat instead
+        1: {"plane_enabled": False, "fall_cost": 0.0},
+        # Level 2: still plane at a random height (1.0-1.8 m), tilt (up to 45 degrees per axis) and
+        # spot (up to 0.3 m off-centre). Some pass over the standing agent, some cut its head (lean),
+        # some need a duck or kneel, so it learns to pick the highest posture that clears the plane.
+        # The tilt limit leaves out walls through the centre, which the small platform can't escape
+        2: {"plane_enabled": True, "plane_height_range": [1.0, 1.8], "plane_tilt_range": 45.0,
+            "plane_offset_range": 0.3},
+        # Level 3: "bullets". A 1.5 m square plane flies through at chest/head height at 1.5 m/s,
+        # tilted up to 20 degrees per axis, and a new one comes from a random direction every
+        # ~2.7 s (5-6 per episode). Too wide to get around on the small platform, so the agent
+        # has to duck or lean back as it passes, and the height reward pulls it up in between
+        3: {"plane_enabled": True, "plane_slide_speed": 1.5, "plane_slide_distance": 2.0,
+            "plane_half_size": 0.75, "plane_repeat": True, "plane_tilt_range": 20.0},
     },
 
     # Lift task for Ant - keep certain feet off the ground

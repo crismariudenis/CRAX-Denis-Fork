@@ -92,7 +92,11 @@ class SafeDodge(PipelineEnv, ABC):
             plane_enabled: bool = True,
             plane_slide_speed: float = 0.0,
             plane_slide_distance: float = 1.5,
-            platform_radius: float = 0.75,
+            plane_offset_range: float = 0.0,
+            plane_height_range: Optional[Tuple[float, float]] = None,
+            plane_half_size: Optional[float] = None,
+            plane_repeat: bool = False,
+            platform_radius: float = 0.5,
             episode_length: int = 1000,
             backend: str = 'generalized',
             **kwargs,
@@ -114,24 +118,33 @@ class SafeDodge(PipelineEnv, ABC):
             plane_cost_weight: Cost per metre of hitbox overlap with the plane,
                 summed over all body parts.
             fall_cost: Cost added on every step the agent is fallen (torso out of
-                healthy_z_range or off the platform), at every level; with
-                terminate_when_unhealthy that is only the final step. Without it,
-                falling on purpose ends the episode and so avoids all further
-                plane cost, which the Lagrangian rewards once the multiplier is
-                large. 25 equals the default --safety_bound, so one fall uses the
-                whole episode's budget.
+                healthy_z_range or off the platform), plane enabled or not; with
+                terminate_when_unhealthy that is only the final step.
             plane_tilt_range: Max random tilt of the plane in degrees, per axis,
                 drawn at every reset (see _sample_plane_tilt). 0 keeps it fixed,
                 90 allows a vertical wall.
-            plane_enabled: False hides the plane and makes its cost 0 (e.g. a
-                stand-up-only level). It is still observed, so the observation
-                stays the same size and keeps realistic values across levels.
+            plane_enabled: False hides the plane and makes its cost 0. It is still
+                observed, so the observation is the same at every level.
             plane_slide_speed: Speed in m/s at which the plane slides horizontally
                 (direction drawn at every reset, see _sample_plane_slide). 0 keeps
                 it still.
             plane_slide_distance: How far in metres from plane_point the sliding
                 plane starts; it passes plane_point after
                 plane_slide_distance / plane_slide_speed seconds.
+            plane_offset_range: Max horizontal distance in metres the plane is
+                moved from plane_point, drawn uniformly over a disc at every reset
+                (see _sample_plane_position). 0 keeps it on plane_point.
+            plane_height_range: (low, high) in metres: the plane's centre height,
+                drawn uniformly at every reset (and every pass), replacing
+                plane_point's z. None keeps plane_point's height.
+            plane_half_size: Half the side length in metres of the square plane.
+                The plane is exactly the drawn square: body parts that aren't over
+                or under it cost nothing. None picks a size that, at any tilt,
+                reaches from the plane's centre to the platform's edge.
+            plane_repeat: With a sliding plane, start a new pass (new random tilt,
+                position and direction) each time the plane is plane_slide_distance
+                past plane_point, i.e. every 2 * plane_slide_distance /
+                plane_slide_speed seconds.
             platform_radius: Radius in metres of the round platform the agent
                 stands on, centred on the origin. The torso leaving it counts as a fall.
             episode_length: Maximum number of steps per episode.
@@ -144,8 +157,6 @@ class SafeDodge(PipelineEnv, ABC):
             raise ValueError('plane_normal must be a non-zero vector.')
         plane_normal = plane_normal / normal_norm
         self._plane_cost_weight = plane_cost_weight if plane_enabled else 0.0
-        if fall_cost < 0.0:
-            raise ValueError('fall_cost must be >= 0.')
         self._fall_cost = fall_cost
         # Neither side is special, so tilting past 90 only repeats smaller tilts
         if not 0.0 <= plane_tilt_range <= 90.0:
@@ -155,6 +166,16 @@ class SafeDodge(PipelineEnv, ABC):
             raise ValueError('plane_slide_speed and plane_slide_distance must be >= 0.')
         self._plane_slide_speed = plane_slide_speed
         self._plane_slide_distance = plane_slide_distance if plane_slide_speed > 0.0 else 0.0
+        self._plane_offset_range = plane_offset_range
+        if plane_height_range is None:
+            plane_height_range = (plane_point[2], plane_point[2])
+        if not 0.0 < plane_height_range[0] <= plane_height_range[1]:
+            raise ValueError('plane_height_range must be (low, high) with 0 < low <= high.')
+        self._plane_height_range = (float(plane_height_range[0]), float(plane_height_range[1]))
+        self._plane_base_height = float(plane_point[2])
+        if plane_repeat and plane_slide_speed <= 0.0:
+            raise ValueError('plane_repeat needs a sliding plane (plane_slide_speed > 0).')
+        self._plane_repeat = plane_repeat
         if platform_radius <= 0.0:
             raise ValueError('platform_radius must be positive.')
         self._platform_radius = platform_radius
@@ -171,11 +192,14 @@ class SafeDodge(PipelineEnv, ABC):
         xml_string = xml_string.replace('PLANE_POS', ' '.join(str(v) for v in plane_point))
         xml_string = xml_string.replace('PLANE_NORMAL', ' '.join(str(v) for v in plane_normal))
         xml_string = xml_string.replace('PLATFORM_RADIUS', str(float(platform_radius)))
-        # Visual size only (the cost treats the plane as infinite): big enough that, at any
-        # tilt, it reaches from its centre down to the platform's edge. The slide offset is left
-        # out to keep it small, so a sliding plane can still cost where it isn't drawn
-        plane_half_size = np.hypot(platform_radius + np.linalg.norm(plane_point[:2]), plane_point[2])
-        xml_string = xml_string.replace('PLANE_HALF_SIZE', str(plane_half_size))
+        # The drawn square is also the hazard (see _part_overlaps). By default it's big enough
+        # that, at any tilt, it reaches from its centre down to the platform's edge
+        if plane_half_size is None:
+            plane_half_size = np.hypot(
+                platform_radius + np.linalg.norm(plane_point[:2]) + plane_offset_range,
+                max(plane_point[2], self._plane_height_range[1]))
+        self._plane_half_size = float(plane_half_size)
+        xml_string = xml_string.replace('PLANE_HALF_SIZE', str(self._plane_half_size))
         # Group 3 is hidden in renders
         xml_string = xml_string.replace('PLANE_GROUP', '2' if plane_enabled else '3')
 
@@ -216,15 +240,16 @@ class SafeDodge(PipelineEnv, ABC):
         joint_id = lambda name: mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_JOINT, name)
         plane_bodies = (body_id('plane_slider'), body_id('hazard_plane'))
         self._plane_link = plane_bodies[1] - 1
-        slide_joints = [joint_id('plane_slide_x'), joint_id('plane_slide_y')]
+        # Position: x, y, z offset of the plane from plane_point
+        pos_joints = [joint_id('plane_slide_x'), joint_id('plane_slide_y'), joint_id('plane_slide_z')]
         tilt_joints = [joint_id('plane_tilt_x'), joint_id('plane_tilt_y')]
-        self._plane_slide_q = jp.array(mj_model.jnt_qposadr[slide_joints])
-        self._plane_slide_qd = jp.array(mj_model.jnt_dofadr[slide_joints])
+        self._plane_pos_q = jp.array(mj_model.jnt_qposadr[pos_joints])
+        self._plane_pos_qd = jp.array(mj_model.jnt_dofadr[pos_joints])
         self._plane_tilt_q = jp.array(mj_model.jnt_qposadr[tilt_joints])
         self._plane_tilt_qd = jp.array(mj_model.jnt_dofadr[tilt_joints])
 
         # The agent's own slice of the physics state: everything but the plane
-        plane_joints = slide_joints + tilt_joints
+        plane_joints = pos_joints + tilt_joints
         self._agent_q = jp.array(np.setdiff1d(np.arange(self.sys.q_size()), mj_model.jnt_qposadr[plane_joints]))
         self._agent_qd = jp.array(np.setdiff1d(np.arange(self.sys.qd_size()), mj_model.jnt_dofadr[plane_joints]))
         self._agent_links = jp.array([i for i in range(self.sys.num_links()) if i + 1 not in plane_bodies])
@@ -255,6 +280,9 @@ class SafeDodge(PipelineEnv, ABC):
         # Store previous state for velocity calculation
         pipeline_state0 = state.pipeline_state
         pipeline_state = self.pipeline_step(pipeline_state0, action)
+        new_info = dict(state.info)
+        if self._plane_repeat:
+            pipeline_state, new_info["plane_rng"] = self._next_pass(pipeline_state, state.info["plane_rng"])
 
         # Healthy reward
         min_z, _ = self._healthy_z_range
@@ -284,7 +312,6 @@ class SafeDodge(PipelineEnv, ABC):
         state.metrics.update(metrics)
 
         # Update info dictionary with cost
-        new_info = dict(state.info)
         new_info.update({k: metrics[k] for k in self._INFO_KEYS})
         new_info["step_count"] = state.info.get("step_count", 0) + 1
 
@@ -313,13 +340,9 @@ class SafeDodge(PipelineEnv, ABC):
             rng2, (self.sys.qd_size(),), minval=low, maxval=hi
         )
 
-        # New random plane tilt and slide for this episode. The tilt never changes;
-        # the slide keeps its velocity (nothing pushes or brakes the plane)
-        qpos = qpos.at[self._plane_tilt_q].set(self._sample_plane_tilt(rng3))
-        qvel = qvel.at[self._plane_tilt_qd].set(0.0)
-        slide_offset, slide_velocity = self._sample_plane_slide(rng4)
-        qpos = qpos.at[self._plane_slide_q].set(slide_offset)
-        qvel = qvel.at[self._plane_slide_qd].set(slide_velocity)
+        # New random plane tilt, position and slide for this episode. The tilt never
+        # changes during a pass; the slide keeps its velocity (nothing pushes or brakes the plane)
+        qpos, qvel = self._set_plane(qpos, qvel, rng3)
 
         pipeline_state = self.pipeline_init(qpos, qvel)
         obs = self._get_obs(pipeline_state, jp.zeros(self.sys.act_size()))
@@ -330,8 +353,37 @@ class SafeDodge(PipelineEnv, ABC):
             jp.zeros_like, self._metrics(pipeline_state, pipeline_state, zero, zero, zero))
         info = {k: metrics[k] for k in self._INFO_KEYS}
         info["step_count"] = 0
+        info["plane_rng"] = rng4  # draws the next passes when plane_repeat is on
 
         return State(pipeline_state, obs, reward, done, metrics, info)
+
+    def _set_plane(self, qpos: jax.Array, qvel: jax.Array, rng: jax.Array) -> Tuple[jax.Array, jax.Array]:
+        """Puts the plane at the start of a new pass: random tilt, height, position and slide."""
+        rng_tilt, rng_slide, rng_pos = jax.random.split(rng, 3)
+        qpos = qpos.at[self._plane_tilt_q].set(self._sample_plane_tilt(rng_tilt))
+        qvel = qvel.at[self._plane_tilt_qd].set(0.0)
+        # Vertical velocity 0, so the plane only sinks a few mm (see the XML)
+        slide_offset, slide_velocity = self._sample_plane_slide(rng_slide)
+        qpos = qpos.at[self._plane_pos_q].set(self._sample_plane_position(rng_pos) + jp.append(slide_offset, 0.0))
+        qvel = qvel.at[self._plane_pos_qd].set(jp.append(slide_velocity, 0.0))
+        return qpos, qvel
+
+    def _next_pass(self, pipeline_state: base.State, rng: jax.Array) -> Tuple[base.State, jax.Array]:
+        """Starts a new pass once the sliding plane is as far past plane_point as it started before it.
+
+        Decided from the plane's own position, so it stays right after an auto-reset.
+        Returns the (possibly restarted) physics state and the next random key.
+        """
+        rng, pass_rng = jax.random.split(rng)
+        slide_q = pipeline_state.q[self._plane_pos_q[:2]]
+        slide_qd = pipeline_state.qd[self._plane_pos_qd[:2]]
+        direction = slide_qd / jp.maximum(jp.linalg.norm(slide_qd), 1e-6)
+        passed = slide_q @ direction >= self._plane_slide_distance + self._plane_offset_range
+        qpos, qvel = self._set_plane(pipeline_state.q, pipeline_state.qd, pass_rng)
+        restarted = self.pipeline_init(qpos, qvel)
+        pipeline_state = jax.tree_util.tree_map(
+            lambda new, old: jp.where(passed, new, old), restarted, pipeline_state)
+        return pipeline_state, rng
 
     def _is_healthy(self, pipeline_state: base.State) -> jax.Array:
         """1.0 while standing, 0.0 once fallen: torso out of healthy_z_range or off the platform."""
@@ -349,6 +401,19 @@ class SafeDodge(PipelineEnv, ABC):
         """
         r = self._plane_tilt_range
         return jax.random.uniform(rng, (2,), minval=-r, maxval=r)
+
+    def _sample_plane_position(self, rng: jax.Array) -> jax.Array:
+        """Plane offset [x, y, z] from plane_point (m) for a new episode or pass.
+
+        x, y uniform over a disc of radius plane_offset_range; the height uniform
+        over plane_height_range. Edit freely to change how the position is randomized.
+        """
+        rng_r, rng_a, rng_h = jax.random.split(rng, 3)
+        radius = self._plane_offset_range * jp.sqrt(jax.random.uniform(rng_r, ()))
+        angle = jax.random.uniform(rng_a, (), minval=0.0, maxval=2 * jp.pi)
+        low, high = self._plane_height_range
+        height = jax.random.uniform(rng_h, (), minval=low, maxval=high)
+        return jp.array([radius * jp.cos(angle), radius * jp.sin(angle), height - self._plane_base_height])
 
     def _sample_plane_slide(self, rng: jax.Array) -> Tuple[jax.Array, jax.Array]:
         """Plane start offset [x, y] from plane_point (m) and velocity [x, y] (m/s).
@@ -415,16 +480,32 @@ class SafeDodge(PipelineEnv, ABC):
         """How deep each body part's hitbox (sphere or capsule) cuts into the plane, in metres.
 
         > 0: the hitbox intersects the plane by that much.
-        <= 0: no contact; minus the gap to the plane. Neither side is special.
+        <= 0: no contact; minus the gap to the plane (or, for a part that isn't over or
+        under the square, at most minus the gap to its edge). Neither side is special.
+
+        The plane is the drawn square of side 2 * plane_half_size. A part counts when it
+        cuts through the plane and reaches over the square, checked separately along the
+        square's two sides (so a part just past a corner can still count).
         """
         plane_pos, normal = self._plane_frame(pipeline_state)
+        plane_rot = pipeline_state.x.rot[self._plane_link]
+        side_u = brax_math.rotate(jp.array([1.0, 0.0, 0.0]), plane_rot)
+        side_v = brax_math.rotate(jp.array([0.0, 1.0, 0.0]), plane_rot)
         rotate = jax.vmap(brax_math.rotate)
         link_rot = pipeline_state.x.rot[self._part_link]
         center = pipeline_state.x.pos[self._part_link] + rotate(self._part_pos, link_rot)
         axis = rotate(self._part_axis, link_rot)
-        # How far the hitbox extends along the normal from its centre, either way
-        reach = self._part_half_length * jp.abs(axis @ normal) + self._part_radius
-        return reach - jp.abs((center - plane_pos) @ normal)
+        offset = center - plane_pos
+
+        # How far the hitbox extends from its centre along a direction, either way
+        def reach(direction):
+            return self._part_half_length * jp.abs(axis @ direction) + self._part_radius
+
+        depth = reach(normal) - jp.abs(offset @ normal)
+        # How far the hitbox stays outside the square (> 0: past the edge, so no contact)
+        past_edge = jp.maximum(jp.abs(offset @ side_u) - reach(side_u),
+                               jp.abs(offset @ side_v) - reach(side_v)) - self._plane_half_size
+        return jp.where(past_edge > 0.0, jp.minimum(depth, -past_edge), depth)
 
     def _constraint_metrics(self, pipeline_state: base.State) -> dict:
         """Safety constraint: body-part hitboxes intersecting the hazard plane, plus falling.

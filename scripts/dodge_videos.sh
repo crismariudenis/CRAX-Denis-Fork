@@ -12,6 +12,10 @@
 set -e
 cd "$(dirname "$0")/.."
 
+ALG=ppo_pid       # ppo_pid: PID-controlled Lagrange multiplier, damps the overshoot ppo_lag has
+# Max Lagrange multiplier (ppo_pid only). Caps how much cost outweighs reward: the agent then accepts
+# a touch costing up to about fall_cost + 1000 / LAMBDA_CLIP (~125 at 10) rather than falling
+LAMBDA_CLIP=10
 TIMESTEPS=1e8     # total env steps per run, split evenly over the levels (~33M each)
 NUM_ENVS=1024     # parallel envs, lower if the GPU runs out of memory (any number works)
 # PPO needs batch_size x num_minibatches divisible by NUM_ENVS; tying the batch to NUM_ENVS
@@ -26,7 +30,8 @@ MODEL_DIR=models/dodge_$(date +%Y%m%d_%H%M%S)
 
 # 1. Training. The curriculum's built-in video step is skipped because it crashes (it records
 # from the batched eval env); step 2 records from the saved checkpoints instead.
-python -m training.train_curriculum --env_name safe_dodge_humanoid --alg ppo_lag --levels 1 2 3 \
+python -m training.train_curriculum --env_name safe_dodge_humanoid --alg $ALG --levels 1 2 3 \
+    --pid_lambda_clip $LAMBDA_CLIP \
     --num_timesteps $TIMESTEPS --num_envs $NUM_ENVS --batch_size $BATCH_SIZE \
     --num_minibatches $NUM_MINIBATCHES --seeds $SEEDS --model_dir $MODEL_DIR \
     --use_wandb false --skip_video
