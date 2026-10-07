@@ -96,7 +96,7 @@ class SafeDodge(PipelineEnv, ABC):
             plane_height_range: Optional[Tuple[float, float]] = None,
             plane_half_size: Optional[float] = None,
             plane_repeat: bool = False,
-            platform_radius: float = 0.5,
+            platform_radius: float = 0.75,
             episode_length: int = 1000,
             backend: str = 'generalized',
             **kwargs,
@@ -118,7 +118,8 @@ class SafeDodge(PipelineEnv, ABC):
             plane_cost_weight: Cost per metre of hitbox overlap with the plane,
                 summed over all body parts.
             fall_cost: Cost added on every step the agent is fallen (torso out of
-                healthy_z_range or off the platform), plane enabled or not; with
+                healthy_z_range or a body part on the floor past the platform's
+                edge), plane enabled or not; with
                 terminate_when_unhealthy that is only the final step.
             plane_tilt_range: Max random tilt of the plane in degrees, per axis,
                 drawn at every reset (see _sample_plane_tilt). 0 keeps it fixed,
@@ -146,7 +147,8 @@ class SafeDodge(PipelineEnv, ABC):
                 past plane_point, i.e. every 2 * plane_slide_distance /
                 plane_slide_speed seconds.
             platform_radius: Radius in metres of the round platform the agent
-                stands on, centred on the origin. The torso leaving it counts as a fall.
+                stands on, centred on the origin. Any body part resting on the floor
+                past its edge counts as a fall; the torso may lean out over it.
             episode_length: Maximum number of steps per episode.
             backend: Physics backend ('generalized', 'spring', 'positional', 'mjx').
         """
@@ -386,13 +388,39 @@ class SafeDodge(PipelineEnv, ABC):
         return pipeline_state, rng
 
     def _is_healthy(self, pipeline_state: base.State) -> jax.Array:
-        """1.0 while standing, 0.0 once fallen: torso out of healthy_z_range or off the platform."""
+        """1.0 while standing, 0.0 once fallen: torso out of healthy_z_range or off the platform.
+
+        Off the platform: any body part resting on the floor past its edge (see
+        _part_off_platform). The torso itself may lean out over the edge.
+        """
         min_z, max_z = self._healthy_z_range
         torso_z = pipeline_state.x.pos[0, 2]
         is_healthy = jp.where((torso_z < min_z) | (torso_z > max_z), 0.0, 1.0)
-        # Torso off the edge of the round platform counts as a fall
-        torso_radius = jp.linalg.norm(pipeline_state.x.pos[0, :2])
-        return jp.where(torso_radius > self._platform_radius, 0.0, is_healthy)
+        return jp.where(self._part_off_platform(pipeline_state), 0.0, is_healthy)
+
+    # A body part whose hitbox bottom is within this many metres of the floor rests on it
+    _GROUND_CONTACT_MARGIN = 0.02
+
+    def _part_off_platform(self, pipeline_state: base.State) -> jax.Array:
+        """True when any body part rests on the floor past the platform's edge.
+
+        The floor that collides is infinite and hidden (the platform is visual only, see
+        the XML), so without this a foot could stand on nothing beside the platform. A
+        part counts when the bottom of its hitbox is within _GROUND_CONTACT_MARGIN of the
+        floor and its centre is past the edge, i.e. more than half of it hangs over.
+        """
+        center, axis = self._part_frames(pipeline_state)
+        bottom = center[:, 2] - (self._part_half_length * jp.abs(axis[:, 2]) + self._part_radius)
+        on_floor = bottom < self._GROUND_CONTACT_MARGIN
+        past_edge = jp.linalg.norm(center[:, :2], axis=-1) > self._platform_radius
+        return jp.any(on_floor & past_edge)
+
+    def _part_frames(self, pipeline_state: base.State) -> Tuple[jax.Array, jax.Array]:
+        """Every body part's hitbox centre and unit axis (a capsule's length) in world coordinates."""
+        rotate = jax.vmap(brax_math.rotate)
+        link_rot = pipeline_state.x.rot[self._part_link]
+        center = pipeline_state.x.pos[self._part_link] + rotate(self._part_pos, link_rot)
+        return center, rotate(self._part_axis, link_rot)
 
     def _sample_plane_tilt(self, rng: jax.Array) -> jax.Array:
         """Plane tilt [about x, about y] in radians for a new episode.
@@ -491,10 +519,7 @@ class SafeDodge(PipelineEnv, ABC):
         plane_rot = pipeline_state.x.rot[self._plane_link]
         side_u = brax_math.rotate(jp.array([1.0, 0.0, 0.0]), plane_rot)
         side_v = brax_math.rotate(jp.array([0.0, 1.0, 0.0]), plane_rot)
-        rotate = jax.vmap(brax_math.rotate)
-        link_rot = pipeline_state.x.rot[self._part_link]
-        center = pipeline_state.x.pos[self._part_link] + rotate(self._part_pos, link_rot)
-        axis = rotate(self._part_axis, link_rot)
+        center, axis = self._part_frames(pipeline_state)
         offset = center - plane_pos
 
         # How far the hitbox extends from its centre along a direction, either way
@@ -612,8 +637,8 @@ class SafeDodge(PipelineEnv, ABC):
         """Where the torso is on the platform (4 values).
 
         [torso x, y relative to the platform centre (2), platform radius (1),
-        distance from the torso to the edge (1)]. The edge distance is what
-        matters most when the platform is small.
+        distance from the torso to the edge (1), negative when it leans out over
+        the edge]. The edge distance is what matters most when the platform is small.
         """
         torso_xy = pipeline_state.x.pos[0, :2]
         edge_distance = self._platform_radius - jp.linalg.norm(torso_xy)

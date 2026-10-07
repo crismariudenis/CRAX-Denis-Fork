@@ -40,7 +40,8 @@
         <light cutoff="100" diffuse="1 1 1" dir="-0 0 -1.3" directional="true" exponent="1" pos="0 0 1.3" specular=".1 .1 .1" castshadow="false"/>
         <!-- The agent stands on a round platform. Brax can't collide with thick cylinders, so the
              infinite floor does the colliding but is hidden (group 3), and the platform is visual only.
-             Leaving the platform is a fall (see SafeDodge.step). PLATFORM_RADIUS is replaced at load time. -->
+             Any part resting on the floor past the platform's edge is a fall
+             (see SafeDodge._is_healthy). PLATFORM_RADIUS is replaced at load time. -->
         <geom conaffinity="1" condim="3" friction="1 .1 .1" material="MatPlane" name="floor" pos="0 0 0" size="20 20 0.125" type="plane" group="3"/>
         <geom name="platform" type="cylinder" pos="0 0 -0.05" size="PLATFORM_RADIUS 0.05" material="MatPlatform"
               contype="0" conaffinity="0"/>

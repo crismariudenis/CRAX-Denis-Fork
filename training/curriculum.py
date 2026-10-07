@@ -40,7 +40,7 @@ Example usage:
 
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from crax import envs
 
@@ -195,22 +195,24 @@ def train_curriculum(
 def create_difficulty_curriculum(
         env_name: str,
         levels: List[int],
-        steps_per_level: int,
+        steps_per_level: Union[int, List[int]],
 ) -> List[Stage]:
     """Create a curriculum for environments with difficulty levels.
 
     Args:
         env_name: Environment name (e.g., 'safe_reacher', 'safe_goal_point').
         levels: List of difficulty levels to train on.
-        steps_per_level: Number of training steps per level.
+        steps_per_level: Number of training steps per level, either one number for
+            every level or one per level (same length as levels).
 
     Returns:
         List of Stage objects.
     """
-    stages = []
-    for level in levels:
-        stages.append(Stage(env_name, level, steps_per_level))
-    return stages
+    if isinstance(steps_per_level, int):
+        steps_per_level = [steps_per_level] * len(levels)
+    if len(steps_per_level) != len(levels):
+        raise ValueError(f'Got {len(steps_per_level)} step counts for {len(levels)} levels.')
+    return [Stage(env_name, level, steps) for level, steps in zip(levels, steps_per_level)]
 
 
 def split_budget_curriculum(

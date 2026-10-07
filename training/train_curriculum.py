@@ -25,7 +25,13 @@ from training.run_utils import (
 def main():
     parser = build_base_parser(description='Curriculum training across difficulty levels')
     parser.add_argument('--levels', type=int, nargs='+', default=[1, 2, 3], help='Difficulty levels to train on')
+    parser.add_argument('--level_steps', type=float, nargs='+', default=None,
+                        help='Training steps per level, one per --levels entry (e.g. 1e8 5e7 5e7); '
+                             'replaces --num_timesteps split evenly over the levels')
     config = parser.parse_args()
+    if config.level_steps is not None and len(config.level_steps) != len(config.levels):
+        parser.error(f'--level_steps needs one value per level ({len(config.levels)}), '
+                     f'got {len(config.level_steps)}')
 
     alg_name = config.alg
     env_name = config.env_name
@@ -44,7 +50,8 @@ def main():
         stages = curriculum.create_difficulty_curriculum(
             env_name=env_name,
             levels=config.levels,
-            steps_per_level=int(config.num_timesteps // len(config.levels)),
+            steps_per_level=([int(s) for s in config.level_steps] if config.level_steps is not None
+                             else int(config.num_timesteps // len(config.levels))),
         )
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')

@@ -16,7 +16,9 @@ ALG=ppo_pid       # ppo_pid: PID-controlled Lagrange multiplier, damps the overs
 # Max Lagrange multiplier (ppo_pid only). Caps how much cost outweighs reward: the agent then accepts
 # a touch costing up to about fall_cost + 1000 / LAMBDA_CLIP (~125 at 10) rather than falling
 LAMBDA_CLIP=10
-TIMESTEPS=1e8     # total env steps per run, split evenly over the levels (~33M each)
+# Env steps per level (1 2 3). Level 1 gets the most: levels 2 and 3 only work once it can stand
+# through a whole episode. 1e8 steps took ~55 min at 1024 envs, so this is ~2 h per seed
+LEVEL_STEPS="8e7 6e7 6e7"
 NUM_ENVS=1024     # parallel envs, lower if the GPU runs out of memory (any number works)
 # PPO needs batch_size x num_minibatches divisible by NUM_ENVS; tying the batch to NUM_ENVS
 # always satisfies that (at 1024 it equals the defaults, 1024 x 32)
@@ -32,7 +34,7 @@ MODEL_DIR=models/dodge_$(date +%Y%m%d_%H%M%S)
 # from the batched eval env); step 2 records from the saved checkpoints instead.
 python -m training.train_curriculum --env_name safe_dodge_humanoid --alg $ALG --levels 1 2 3 \
     --pid_lambda_clip $LAMBDA_CLIP \
-    --num_timesteps $TIMESTEPS --num_envs $NUM_ENVS --batch_size $BATCH_SIZE \
+    --level_steps $LEVEL_STEPS --num_envs $NUM_ENVS --batch_size $BATCH_SIZE \
     --num_minibatches $NUM_MINIBATCHES --seeds $SEEDS --model_dir $MODEL_DIR \
     --use_wandb false --skip_video
 
