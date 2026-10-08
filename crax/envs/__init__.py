@@ -36,6 +36,7 @@ from crax.envs import inverted_pendulum
 from crax.envs import pusher
 from crax.envs import reacher
 from crax.envs import safe_ant
+from crax.envs import safe_bullets
 from crax.envs import safe_height
 from crax.envs import safe_lift
 from crax.envs import safe_pathway
@@ -67,6 +68,7 @@ from crax.envs.safe_velocity import (
     SafeVelocitySwimmer,
     SafeVelocityWalker2d,
 )
+from crax.envs.safe_bullets import SafeBullets, SafeBulletsHumanoid
 from crax.envs.wrappers import training
 
 _envs = {
@@ -104,6 +106,8 @@ _envs = {
     'safe_velocity_walker2d': SafeVelocityWalker2d,
     # Stand-alone tasks
     'safe_reacher': safe_reacher.SafeReacher,
+    # Bullet dodging
+    'safe_bullets_humanoid': SafeBulletsHumanoid,
 }
 
 
