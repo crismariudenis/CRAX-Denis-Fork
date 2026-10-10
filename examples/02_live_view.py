@@ -31,6 +31,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+import shutil
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WATCH_SUFFIXES = {".py", ".xml", ".obj", ".stl", ".png"}
@@ -94,7 +95,14 @@ def stop(proc):
 
 def run_watcher(args) -> None:
     cam_file = Path(tempfile.gettempdir()) / f"crax_live_view_cam_{os.getpid()}.json"
-    child_cmd = [sys.executable, __file__, "--_child", "--_cam_file", str(cam_file)]
+
+    mjpython = shutil.which("mjpython")
+    if mjpython is None:
+        raise RuntimeError(
+            "mjpython not found. On macOS, run this script with mjpython."
+        )
+
+    child_cmd = [mjpython, __file__,"--_child","--_cam_file",str(cam_file),]
     child_cmd += [a for a in sys.argv[1:] if a != "--no_reload"]
 
     mtimes = snapshot(args.watch)
