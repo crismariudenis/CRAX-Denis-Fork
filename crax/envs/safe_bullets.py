@@ -110,8 +110,8 @@ class SafeBullets(PipelineEnv, ABC):
             bullet_spawn_x_range: Tuple[float, float] = (2.0, 5.0),
             bullet_spawn_y_range: Tuple[float, float] = (-1.5, 1.5),
             bullet_spawn_z_range: Tuple[float, float] = (0.2, 1.8),
-            bullet_vel_y_range: Tuple[float, float] = (-1.0, 1.0),
-            bullet_vel_z_range: Tuple[float, float] = (-1.0, 1.0),
+            bullet_vel_y_range: Tuple[float, float] = (0.0, 0.0),
+            bullet_vel_z_range: Tuple[float, float] = (0.0, 0.0),
             bullet_reset_x: float = -1.0,
             bullet_cost_weight: float = 1.25,
             fall_cost: float = 25.0,
@@ -137,8 +137,8 @@ class SafeBullets(PipelineEnv, ABC):
             bullet_spawn_x_range: (min, max) x-position for bullet spawn (front of humanoid).
             bullet_spawn_y_range: (min, max) y-position for bullet spawn.
             bullet_spawn_z_range: (min, max) z-position for bullet spawn.
-            bullet_vel_y_range: (min, max) y-velocity component for bullets.
-            bullet_vel_z_range: (min, max) z-velocity component for bullets.
+            bullet_vel_y_range: (min, max) y-velocity component for bullets (default 0 = straight).
+            bullet_vel_z_range: (min, max) z-velocity component for bullets (default 0 = straight).
             bullet_reset_x: x-position at which bullets reset (behind humanoid).
             bullet_cost_weight: Cost per metre of hitbox overlap with bullets,
                 summed over all body parts and bullets.

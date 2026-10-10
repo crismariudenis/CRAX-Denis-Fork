@@ -54,6 +54,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--watch", type=str, nargs="*", default=[str(REPO_ROOT / "crax")],
                    help="Files/directories to watch for changes (default: crax/)")
     p.add_argument("--no_reload", action="store_true", help="Run once without watching files")
+    # Bullet visualization controls (for safe_bullets environments)
+    p.add_argument("--bullet_speed", type=float, default=None,
+                   help="Override bullet speed (m/s). Lower = slower, easier to see.")
+    p.add_argument("--bullet_spawn_x", type=float, default=None,
+                   help="Override bullet spawn X distance (m). Higher = further away.")
+    p.add_argument("--bullet_vel_y", type=float, default=None,
+                   help="Override bullet Y velocity (m/s). 0 = straight toward humanoid.")
+    p.add_argument("--bullet_vel_z", type=float, default=None,
+                   help="Override bullet Z velocity (m/s). 0 = straight toward humanoid.")
     # Internal: set by the watcher when it spawns the viewer process.
     p.add_argument("--_child", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--_cam_file", type=str, default=None, help=argparse.SUPPRESS)
@@ -164,13 +173,32 @@ def run_viewer(args) -> None:
 
     from crax import envs
 
-    env = envs.get_environment(args.env_name, level=args.level, **json.loads(args.env_kwargs))
+    # Build env_kwargs with bullet visualization overrides
+    env_kwargs = json.loads(args.env_kwargs)
+    if args.bullet_speed is not None:
+        env_kwargs['bullet_speed_range'] = (args.bullet_speed, args.bullet_speed)
+    if args.bullet_spawn_x is not None:
+        env_kwargs['bullet_spawn_x_range'] = (args.bullet_spawn_x, args.bullet_spawn_x)
+    if args.bullet_vel_y is not None:
+        env_kwargs['bullet_vel_y_range'] = (args.bullet_vel_y, args.bullet_vel_y)
+    if args.bullet_vel_z is not None:
+        env_kwargs['bullet_vel_z_range'] = (args.bullet_vel_z, args.bullet_vel_z)
+
+    env = envs.get_environment(args.env_name, level=args.level, **env_kwargs)
     model = env.sys.mj_model
     data = mujoco.MjData(model)
     dt = float(env.dt)
     episode_length = getattr(env, "episode_length", 1000)
     print(f"[live_view] env={args.env_name} level={args.level} physics={args.physics} "
           f"dt={dt:.4f}s action_size={env.action_size}")
+    if args.bullet_speed is not None:
+        print(f"[live_view] bullet_speed overridden to {args.bullet_speed} m/s")
+    if args.bullet_spawn_x is not None:
+        print(f"[live_view] bullet_spawn_x overridden to {args.bullet_spawn_x} m")
+    if args.bullet_vel_y is not None:
+        print(f"[live_view] bullet_vel_y overridden to {args.bullet_vel_y} m/s")
+    if args.bullet_vel_z is not None:
+        print(f"[live_view] bullet_vel_z overridden to {args.bullet_vel_z} m/s")
 
     # Reset through the env so the initial pose matches training (spawn height, noise, ...).
     reset_fn = jax.jit(env.reset)
