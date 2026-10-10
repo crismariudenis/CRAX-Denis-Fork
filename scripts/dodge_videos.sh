@@ -1,43 +1,30 @@
 #!/usr/bin/env bash
-# Full safe_dodge_humanoid training on a server, then videos of the result.
-#   1. Curriculum training through levels 1 -> 2 -> 3 (1: no plane, 2: still plane,
-#      3: sliding plane), each level starting from the previous level's policy. One run per seed.
-#   2. Videos of every run's final policy on every level from the front, side and orbit cameras,
-#      15 s each; a fall resets the episode and the video keeps going.
-#      Output: videos/sd_<run id>_lvl<level>_<camera>.mp4 (the log says which run each id is)
-#
-# Edit the settings below, then start it so it keeps running after you log out:
+# Full safe_dodge_humanoid curriculum (levels 1 -> 2 -> 3), then videos of every run on every level.
 #   nohup bash scripts/dodge_videos.sh > dodge_run.log 2>&1 &
-#   tail -f dodge_run.log
 set -e
 cd "$(dirname "$0")/.."
 
-ALG=ppo_pid       # ppo_pid: PID-controlled Lagrange multiplier, damps the overshoot ppo_lag has
-# Max Lagrange multiplier (ppo_pid only). Caps how much cost outweighs reward: the agent then accepts
-# a touch costing up to about fall_cost + 1000 / LAMBDA_CLIP (~125 at 10) rather than falling
-LAMBDA_CLIP=10
-# Env steps per level (1 2 3). Level 1 gets the most: levels 2 and 3 only work once it can stand
-# through a whole episode. 1e8 steps took ~55 min at 1024 envs, so this is ~2 h per seed
-LEVEL_STEPS="8e7 6e7 6e7"
-NUM_ENVS=1024     # parallel envs, lower if the GPU runs out of memory (any number works)
-# PPO needs batch_size x num_minibatches divisible by NUM_ENVS; tying the batch to NUM_ENVS
-# always satisfies that (at 1024 it equals the defaults, 1024 x 32)
-BATCH_SIZE=$NUM_ENVS
+ALG=ppo_pid
+LAMBDA_CLIP=10            # max Lagrange multiplier
+LEVEL_STEPS="8e7 6e7 6e7" # env steps per level
+NUM_ENVS=2048             # lower (with BATCH_SIZE) if the GPU runs out of memory
+BATCH_SIZE=1024           # batch_size x num_minibatches must be divisible by NUM_ENVS
 NUM_MINIBATCHES=32
-SEEDS="69"     # one full curriculum run per seed, one after the other
-VIDEO_STEPS=1000  # one step is 0.015 s, so 1000 steps = 15 s per video
-FPS=60            # ~67 is real time; lower = slow motion
-# This run's own checkpoint folder, so the videos only pick up runs started by this script
+SEEDS="69"
+VIDEO_STEPS=1000          # 15 s
+FPS=60
 MODEL_DIR=models/dodge_$(date +%Y%m%d_%H%M%S)
+# Brax's humanoid PPO settings, the ones level 1 learned to stand with
+PPO_ARGS="--learning_rate 3e-4 --entropy_cost 1e-3 --discounting 0.97 --unroll_length 10
+          --num_updates_per_batch 8 --deterministic_eval true --num_evals 20"
 
-# 1. Training. The curriculum's built-in video step is skipped because it crashes (it records
-# from the batched eval env); step 2 records from the saved checkpoints instead.
+# 1. Training (the curriculum's own video step crashes, so it is skipped)
 python -m training.train_curriculum --env_name safe_dodge_humanoid --alg $ALG --levels 1 2 3 \
     --pid_lambda_clip $LAMBDA_CLIP \
     --level_steps $LEVEL_STEPS --num_envs $NUM_ENVS --batch_size $BATCH_SIZE \
     --num_minibatches $NUM_MINIBATCHES --seeds $SEEDS --model_dir $MODEL_DIR \
-    --use_wandb false --skip_video
+    --use_wandb false --skip_video $PPO_ARGS
 
-# 2. Videos. To re-record later without training: the same command with the run's models/ folder
+# 2. Videos
 python scripts/dodge_policy_videos.py --runs_dir $MODEL_DIR --levels 1 2 3 \
     --steps $VIDEO_STEPS --fps $FPS --cameras front side orbit
