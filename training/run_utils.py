@@ -492,18 +492,24 @@ def record_episode_video(
 
     @jax.jit
     def rollout_one(key):
-        state = reset_fn(key)
+        # The env may be vmapped (e.g., VmapWrapper with batch_size=None).
+        # Add a batch dimension of 1 to the key, then squeeze outputs.
+        key_batched = key[None, :]  # shape (1, 2)
+        state = reset_fn(key_batched)
 
         def step_body(carry, _):
             state, key = carry
             key, sk = jax.random.split(key)
-            action, _ = infer(state.obs, sk)
-            next_state = step_fn(state, action)
+            # Squeeze batch dim from obs for infer (expects single obs), then add batch dim to action
+            obs_squeezed = jax.tree_util.tree_map(lambda x: jnp.squeeze(x, axis=0), state.obs)
+            action, _ = infer(obs_squeezed, sk)
+            action_batched = jax.tree_util.tree_map(lambda x: x[None, :], action)
+            next_state = step_fn(state, action_batched)
 
             frame = next_state.pipeline_state  # for render
-            reward = next_state.reward  # scalar
+            reward = next_state.reward  # scalar (batched: shape (1,))
             # Be robust to envs without a 'cost' signal
-            cost = next_state.info.get("cost", jnp.zeros_like(next_state.reward))  # scalar
+            cost = next_state.info.get("cost", jnp.zeros_like(next_state.reward))  # scalar (batched)
             # Also mark termination if env signals done OR NaNs appear in obs/reward
             obs_for_nan = next_state.obs
             if isinstance(obs_for_nan, dict):
@@ -523,6 +529,16 @@ def record_episode_video(
         (final_state, _), (frames, rewards, costs, dones, done_goal, done_nan, done_unhealthy) = jax.lax.scan(
             step_body, (state, key), xs=None, length=steps
         )
+        # Squeeze batch dimension (1,) from all outputs
+        def squeeze_batch(x):
+            return jnp.squeeze(x, axis=0) if hasattr(x, 'shape') and x.shape[0] == 1 else x
+        frames = jax.tree_util.tree_map(squeeze_batch, frames)
+        rewards = squeeze_batch(rewards)
+        costs = squeeze_batch(costs)
+        dones = squeeze_batch(dones)
+        done_goal = squeeze_batch(done_goal)
+        done_nan = squeeze_batch(done_nan)
+        done_unhealthy = squeeze_batch(done_unhealthy)
         return frames, rewards, costs, dones, done_goal, done_nan, done_unhealthy
 
     # 3) Run N episodes to collect frames
