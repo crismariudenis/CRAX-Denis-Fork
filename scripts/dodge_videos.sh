@@ -6,7 +6,8 @@ cd "$(dirname "$0")/.."
 
 ALG=ppo_pid
 LAMBDA_CLIP=10            # max Lagrange multiplier
-LEVEL_STEPS="8e7 6e7 6e7" # env steps per level
+LEVELS=${LEVELS:-"1 2 3"}                     # e.g. LEVELS=1 LEVEL_STEPS=3e7 bash scripts/dodge_videos.sh
+LEVEL_STEPS=${LEVEL_STEPS:-"8e7 6e7 6e7"}     # env steps per level
 NUM_ENVS=2048             # lower (with BATCH_SIZE) if the GPU runs out of memory
 BATCH_SIZE=1024           # batch_size x num_minibatches must be divisible by NUM_ENVS
 NUM_MINIBATCHES=32
@@ -19,12 +20,12 @@ PPO_ARGS="--learning_rate 3e-4 --entropy_cost 1e-3 --discounting 0.97 --unroll_l
           --num_updates_per_batch 8 --deterministic_eval true --num_evals 20"
 
 # 1. Training (the curriculum's own video step crashes, so it is skipped)
-python -m training.train_curriculum --env_name safe_dodge_humanoid --alg $ALG --levels 1 2 3 \
+python -m training.train_curriculum --env_name safe_dodge_humanoid --alg $ALG --levels $LEVELS \
     --pid_lambda_clip $LAMBDA_CLIP \
     --level_steps $LEVEL_STEPS --num_envs $NUM_ENVS --batch_size $BATCH_SIZE \
     --num_minibatches $NUM_MINIBATCHES --seeds $SEEDS --model_dir $MODEL_DIR \
     --use_wandb false --skip_video $PPO_ARGS
 
 # 2. Videos
-python scripts/dodge_policy_videos.py --runs_dir $MODEL_DIR --levels 1 2 3 \
+python scripts/dodge_policy_videos.py --runs_dir $MODEL_DIR --levels $LEVELS \
     --steps $VIDEO_STEPS --fps $FPS --cameras front side orbit

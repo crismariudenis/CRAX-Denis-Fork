@@ -81,6 +81,8 @@ class SafeDodge(PipelineEnv, ABC):
             ctrl_cost_weight=0.1,
             healthy_reward=5.0,
             height_reward_weight: float = 5.0,
+            upright_reward_weight: float = 0.0,
+            still_cost_weight: float = 1.0,
             terminate_when_unhealthy=True,
             healthy_z_range: Optional[Tuple[float, float]] = None,
             reset_noise_scale=1e-2,
@@ -107,6 +109,8 @@ class SafeDodge(PipelineEnv, ABC):
             ctrl_cost_weight: Weight for control cost penalty.
             healthy_reward: Reward for staying healthy (alive).
             height_reward_weight: Reward for standing upright, 0 at the fall height.
+            upright_reward_weight: Reward for keeping the torso vertical.
+            still_cost_weight: Penalty per m/s of horizontal centre-of-mass speed.
             terminate_when_unhealthy: Whether to terminate episode when unhealthy.
             healthy_z_range: (min, max) z-range for healthy state.
             reset_noise_scale: Scale of noise added to initial state.
@@ -204,6 +208,8 @@ class SafeDodge(PipelineEnv, ABC):
         self._ctrl_cost_weight = ctrl_cost_weight
         self._healthy_reward = healthy_reward
         self._height_reward_weight = height_reward_weight
+        self._upright_reward_weight = upright_reward_weight
+        self._still_cost_weight = still_cost_weight
         self._terminate_when_unhealthy = terminate_when_unhealthy
         self._healthy_z_range = healthy_z_range
         self._reset_noise_scale = reset_noise_scale
@@ -231,16 +237,21 @@ class SafeDodge(PipelineEnv, ABC):
         part_ids = np.array([g for g in range(mj_model.ngeom)
                              if mj_model.geom_bodyid[g] not in (0, *plane_bodies)])
         part_types = mj_model.geom_type[part_ids]
-        sphere, capsule = int(mujoco.mjtGeom.mjGEOM_SPHERE), int(mujoco.mjtGeom.mjGEOM_CAPSULE)
-        if not np.all((part_types == sphere) | (part_types == capsule)):
-            raise ValueError('SafeDodge agents may only use sphere and capsule geoms.')
+        sphere, capsule, box = (int(mujoco.mjtGeom.mjGEOM_SPHERE), int(mujoco.mjtGeom.mjGEOM_CAPSULE),
+                                int(mujoco.mjtGeom.mjGEOM_BOX))
+        if not np.all(np.isin(part_types, (sphere, capsule, box))):
+            raise ValueError('SafeDodge agents may only use sphere, capsule and box geoms.')
         self._part_link = jp.array(mj_model.geom_bodyid[part_ids] - 1)
         self._part_pos = jp.array(mj_model.geom_pos[part_ids])
-        self._part_axis = jax.vmap(brax_math.rotate, in_axes=(None, 0))(
-            jp.array([0.0, 0.0, 1.0]), jp.array(mj_model.geom_quat[part_ids]))
-        self._part_radius = jp.array(mj_model.geom_size[part_ids, 0])
-        self._part_half_length = jp.array(
-            np.where(part_types == capsule, mj_model.geom_size[part_ids, 1], 0.0))
+        # Each hitbox is a box grown by a radius (sphere: point, capsule: segment, box: radius 0)
+        size = mj_model.geom_size[part_ids]
+        half_size = np.zeros_like(size)
+        half_size[part_types == capsule, 2] = size[part_types == capsule, 1]
+        half_size[part_types == box] = size[part_types == box]
+        self._part_half_size = jp.array(half_size)
+        self._part_radius = jp.array(np.where(part_types == box, 0.0, size[:, 0]))
+        self._part_axes = jax.vmap(jax.vmap(brax_math.rotate, in_axes=(0, None)), in_axes=(None, 0))(
+            jp.eye(3), jp.array(mj_model.geom_quat[part_ids]))
 
     def step(self, state: State, action: jax.Array) -> State:
         """Run one timestep of the environment's dynamics with the plane constraint."""
@@ -268,18 +279,31 @@ class SafeDodge(PipelineEnv, ABC):
         standing = (pipeline_state.x.pos[0, 2] - min_z) / (self.default_spawn_height - min_z)
         height_reward = self._height_reward_weight * jp.clip(standing, 0.0, 1.0)
 
+        # Upright reward: how vertical the torso's z axis is
+        torso_up = brax_math.rotate(jp.array([0.0, 0.0, 1.0]), pipeline_state.x.rot[0])[2]
+        upright_reward = self._upright_reward_weight * jp.clip(torso_up, 0.0, 1.0)
+
+        # Stillness cost: horizontal centre-of-mass speed
+        _, velocity = self._com_velocity(pipeline_state0, pipeline_state)
+        still_cost = self._still_cost_weight * jp.linalg.norm(velocity[:2])
+
         # Control cost
         ctrl_cost = self._ctrl_cost_weight * jp.sum(jp.square(action))
 
         obs = self._get_obs(pipeline_state, action)
 
         # Reward structure
-        reward = healthy_reward + height_reward - ctrl_cost
+        reward = healthy_reward + height_reward + upright_reward - still_cost - ctrl_cost
         done = 1.0 - is_healthy if self._terminate_when_unhealthy else 0.0
 
         # Update metrics
-        metrics = self._metrics(
-            pipeline_state0, pipeline_state, healthy_reward, height_reward, ctrl_cost)
+        metrics = self._metrics(pipeline_state0, pipeline_state, {
+            'reward_alive': healthy_reward,
+            'reward_height': height_reward,
+            'reward_upright': upright_reward,
+            'reward_still': -still_cost,
+            'reward_quadctrl': -ctrl_cost,
+        })
         state.metrics.update(metrics)
 
         # Update info dictionary with cost
@@ -318,8 +342,10 @@ class SafeDodge(PipelineEnv, ABC):
         obs = self._get_obs(pipeline_state, jp.zeros(self.sys.act_size()))
         reward, done, zero = jp.zeros(3)
 
+        rewards = {k: zero for k in ('reward_alive', 'reward_height', 'reward_upright', 'reward_still',
+                                     'reward_quadctrl')}
         metrics = jax.tree_util.tree_map(
-            jp.zeros_like, self._metrics(pipeline_state, pipeline_state, zero, zero, zero))
+            jp.zeros_like, self._metrics(pipeline_state, pipeline_state, rewards))
         info = {k: metrics[k] for k in self._INFO_KEYS}
         info["step_count"] = 0
         info["plane_rng"] = rng4
@@ -361,18 +387,22 @@ class SafeDodge(PipelineEnv, ABC):
 
     def _part_off_platform(self, pipeline_state: base.State) -> jax.Array:
         """True when any body part rests on the floor past the platform's edge."""
-        center, axis = self._part_frames(pipeline_state)
-        bottom = center[:, 2] - (self._part_half_length * jp.abs(axis[:, 2]) + self._part_radius)
+        center, axes = self._part_frames(pipeline_state)
+        bottom = center[:, 2] - self._part_reach(axes, jp.array([0.0, 0.0, 1.0]))
         on_floor = bottom < self._GROUND_CONTACT_MARGIN
         past_edge = jp.linalg.norm(center[:, :2], axis=-1) > self._platform_radius
         return jp.any(on_floor & past_edge)
 
     def _part_frames(self, pipeline_state: base.State) -> Tuple[jax.Array, jax.Array]:
-        """Every body part's hitbox centre and unit axis (a capsule's length) in world coordinates."""
-        rotate = jax.vmap(brax_math.rotate)
+        """Hitbox centres (N, 3) and local axes (N, 3, 3) in world coordinates."""
         link_rot = pipeline_state.x.rot[self._part_link]
-        center = pipeline_state.x.pos[self._part_link] + rotate(self._part_pos, link_rot)
-        return center, rotate(self._part_axis, link_rot)
+        center = pipeline_state.x.pos[self._part_link] + jax.vmap(brax_math.rotate)(self._part_pos, link_rot)
+        axes = jax.vmap(jax.vmap(brax_math.rotate, in_axes=(0, None)))(self._part_axes, link_rot)
+        return center, axes
+
+    def _part_reach(self, axes: jax.Array, direction: jax.Array) -> jax.Array:
+        """How far each hitbox extends from its centre along a unit direction."""
+        return jp.sum(self._part_half_size * jp.abs(axes @ direction), axis=-1) + self._part_radius
 
     def _sample_plane_tilt(self, rng: jax.Array) -> jax.Array:
         """Random plane tilt [about x, about y] in radians."""
@@ -447,11 +477,9 @@ class SafeDodge(PipelineEnv, ABC):
         plane_rot = pipeline_state.x.rot[self._plane_link]
         side_u = brax_math.rotate(jp.array([1.0, 0.0, 0.0]), plane_rot)
         side_v = brax_math.rotate(jp.array([0.0, 1.0, 0.0]), plane_rot)
-        center, axis = self._part_frames(pipeline_state)
+        center, axes = self._part_frames(pipeline_state)
         offset = center - plane_pos
-
-        def reach(direction):
-            return self._part_half_length * jp.abs(axis @ direction) + self._part_radius
+        reach = lambda direction: self._part_reach(axes, direction)
 
         depth = reach(normal) - jp.abs(offset @ normal)
         # > 0: the hitbox is past the square's edge
@@ -478,17 +506,12 @@ class SafeDodge(PipelineEnv, ABC):
     _INFO_KEYS = ('cost', 'plane_distance', 'plane_violation', 'fall_cost')
 
     def _metrics(
-            self, pipeline_state0: base.State, pipeline_state: base.State,
-            healthy_reward: jax.Array, height_reward: jax.Array, ctrl_cost: jax.Array,
+            self, pipeline_state0: base.State, pipeline_state: base.State, rewards: dict,
     ) -> dict:
         """All per-step metrics."""
-        com_before, *_ = self._com(pipeline_state0)
-        com_after, *_ = self._com(pipeline_state)
-        velocity = (com_after - com_before) / self.dt
+        com_after, velocity = self._com_velocity(pipeline_state0, pipeline_state)
         return {
-            'reward_quadctrl': -ctrl_cost,
-            'reward_alive': healthy_reward,
-            'reward_height': height_reward,
+            **rewards,
             'x_position': com_after[0],
             'y_position': com_after[1],
             'distance_from_origin': jp.linalg.norm(com_after),
@@ -496,6 +519,14 @@ class SafeDodge(PipelineEnv, ABC):
             'y_velocity': velocity[1],
             **self._constraint_metrics(pipeline_state),
         }
+
+    def _com_velocity(
+            self, pipeline_state0: base.State, pipeline_state: base.State
+    ) -> Tuple[jax.Array, jax.Array]:
+        """The agent's centre of mass after the step and its velocity over the step."""
+        com_before, *_ = self._com(pipeline_state0)
+        com_after, *_ = self._com(pipeline_state)
+        return com_after, (com_after - com_before) / self.dt
 
     def _get_obs(
             self, pipeline_state: base.State, action: jax.Array
@@ -586,7 +617,7 @@ class SafeDodgeHumanoid(SafeDodge):
 
     @property
     def default_spawn_height(self) -> float:
-        return 1.3
+        return 1.29
 
     @property
     def default_spawn_rotation(self) -> Tuple[float, float, float, float]:
@@ -599,5 +630,5 @@ class SafeDodgeHumanoid(SafeDodge):
     def _get_gear_for_backend(self, backend: str) -> jp.ndarray:
         return jp.array([
             350.0, 350.0, 350.0, 350.0, 350.0, 350.0, 350.0, 350.0, 350.0, 350.0,
-            350.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0,
+            350.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0,
         ])
