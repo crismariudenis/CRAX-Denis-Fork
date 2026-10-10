@@ -215,8 +215,8 @@ class SafeBullets(PipelineEnv, ABC):
 
         # Agent's own slice of the physics state: everything but the bullets
         mj_model = self.sys.mj_model
-        body_id = lambda name: mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, name)
-        bullet_bodies = [body_id(f'bullet{i}') for i in range(self._num_bullets)]
+        # Use bullet slider bodies (which are the bullet bodies with geoms and slide joints)
+        bullet_bodies = self._bullet_slider_body_ids
         self._agent_q = jp.array(np.setdiff1d(np.arange(self.sys.q_size()), mj_model.jnt_qposadr[bullet_bodies]))
         self._agent_qd = jp.array(np.setdiff1d(np.arange(self.sys.qd_size()), mj_model.jnt_dofadr[bullet_bodies]))
         self._agent_links = jp.array([i for i in range(self.sys.num_links()) if i + 1 not in bullet_bodies])
@@ -238,16 +238,20 @@ class SafeBullets(PipelineEnv, ABC):
             np.where(part_types == capsule, mj_model.geom_size[part_ids, 1], 0.0))
 
     def _find_bullet_indices(self):
-        """Find bullet body/joint IDs from the MuJoCo model."""
+        """Find bullet body/joint IDs from the MuJoCo model.
+
+        The bullet geoms are attached to the slider bodies (bullet{i}_slider)
+        because the child bodies without joints get welded to their parent.
+        So the slider bodies ARE the bullet bodies for rendering and collision.
+        """
         mj_model = self.sys.mj_model
         body_id = lambda name: mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, name)
         joint_id = lambda name: mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_JOINT, name)
         
-        # Bullet slider bodies (parents with slide joints)
+        # Bullet slider bodies (parents with slide joints) - these ARE the bullet bodies
+        # because the child bodies get welded to them and their geoms are attached here
         self._bullet_slider_body_ids = [body_id(f'bullet{i}_slider') for i in range(self._num_bullets)]
-        
-        # Bullet mocap bodies (children with mocap=true) - these are the ones we track for positions
-        self._bullet_body_ids = [body_id(f'bullet{i}') for i in range(self._num_bullets)]
+        self._bullet_body_ids = self._bullet_slider_body_ids  # Same bodies
         
         # Bullet slide joints (x, y, z) - these are the qpos/qvel addresses for bullet positions
         self._bullet_slide_x_q = jp.array([mj_model.jnt_qposadr[joint_id(f'bullet{i}_slide_x')] for i in range(self._num_bullets)])
@@ -257,8 +261,8 @@ class SafeBullets(PipelineEnv, ABC):
         self._bullet_slide_y_qd = jp.array([mj_model.jnt_dofadr[joint_id(f'bullet{i}_slide_y')] for i in range(self._num_bullets)])
         self._bullet_slide_z_qd = jp.array([mj_model.jnt_dofadr[joint_id(f'bullet{i}_slide_z')] for i in range(self._num_bullets)])
         
-        # Bullet links in Brax (link i = MuJoCo body i + 1) - use the mocap child bodies
-        self._bullet_links = jp.array([bid + 1 for bid in self._bullet_body_ids])
+        # Bullet links in Brax (link i = MuJoCo body i + 1, so MuJoCo body b = Brax link b-1)
+        self._bullet_links = jp.array([bid - 1 for bid in self._bullet_body_ids])
         # Ensure it's a 1D array for proper indexing
         self._bullet_links = jp.reshape(self._bullet_links, (-1,))
         # Also store as Python list for indexing
