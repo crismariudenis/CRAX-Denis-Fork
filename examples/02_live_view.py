@@ -200,6 +200,24 @@ def run_viewer(args) -> None:
     if args.bullet_vel_z is not None:
         print(f"[live_view] bullet_vel_z overridden to {args.bullet_vel_z} m/s")
 
+    # Hide extra bullets based on level for safe_bullets environments
+    # Level 1: 1 bullet, Level 2: 3 bullets, Level 3: 6 bullets
+    if hasattr(env.env, '_num_bullets'):
+        # Determine number of bullets to show based on level
+        if args.level == 1:
+            num_to_show = 1
+        elif args.level == 2:
+            num_to_show = 3
+        else:
+            num_to_show = 6
+        
+        # Hide bullets beyond num_to_show
+        for i in range(num_to_show, 6):
+            geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, f'bullet{i}')
+            if geom_id >= 0:
+                model.geom_rgba[geom_id, 3] = 0.0  # Set alpha to 0 (invisible)
+        print(f"[live_view] Showing {num_to_show} bullets for level {args.level}, hiding {6 - num_to_show} extra bullets")
+
     # Reset through the env so the initial pose matches training (spawn height, noise, ...).
     reset_fn = jax.jit(env.reset)
     step_fn = jax.jit(env.step) if args.physics == "env" else None

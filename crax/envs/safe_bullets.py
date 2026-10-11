@@ -210,6 +210,13 @@ class SafeBullets(PipelineEnv, ABC):
         self._healthy_z_range = (
             healthy_z_range if healthy_z_range is not None else self.default_healthy_z_range)
 
+        # Hide extra bullets in the model (XML has 6 bullets, but we only use num_bullets)
+        mj_model = self.sys.mj_model
+        for i in range(self._num_bullets, 6):
+            geom_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, f'bullet{i}')
+            if geom_id >= 0:
+                mj_model.geom_rgba[geom_id, 3] = 0.0  # Set alpha to 0 (invisible)
+
         # Find bullet body/mocap indices from the system
         self._find_bullet_indices()
 
@@ -221,16 +228,16 @@ class SafeBullets(PipelineEnv, ABC):
         self._agent_qd = jp.array(np.setdiff1d(np.arange(self.sys.qd_size()), mj_model.jnt_dofadr[bullet_bodies]))
         self._agent_links = jp.array([i for i in range(self.sys.num_links()) if i + 1 not in bullet_bodies])
 
-        # Every body part of the agent (each geom, a sphere or capsule) counts for the bullet cost
+        # Every body part of the agent (each geom, a sphere, capsule, or box) counts for the bullet cost
         part_ids = np.array([g for g in range(mj_model.ngeom)
                              if mj_model.geom_bodyid[g] not in (0, *bullet_bodies)])
         part_types = mj_model.geom_type[part_ids]
-        sphere, capsule = int(mujoco.mjtGeom.mjGEOM_SPHERE), int(mujoco.mjtGeom.mjGEOM_CAPSULE)
-        if not np.all((part_types == sphere) | (part_types == capsule)):
-            raise ValueError('SafeBullets agents may only use sphere and capsule geoms.')
+        sphere, capsule, box = int(mujoco.mjtGeom.mjGEOM_SPHERE), int(mujoco.mjtGeom.mjGEOM_CAPSULE), int(mujoco.mjtGeom.mjGEOM_BOX)
+        if not np.all((part_types == sphere) | (part_types == capsule) | (part_types == box)):
+            raise ValueError('SafeBullets agents may only use sphere, capsule, and box geoms.')
         self._part_link = jp.array(mj_model.geom_bodyid[part_ids] - 1)
         self._part_pos = jp.array(mj_model.geom_pos[part_ids])
-        # A capsule's axis is its geom's local z; a sphere gets half-length 0
+        # A capsule's axis is its geom's local z; a sphere/box gets half-length 0
         self._part_axis = jax.vmap(brax_math.rotate, in_axes=(None, 0))(
             jp.array([0.0, 0.0, 1.0]), jp.array(mj_model.geom_quat[part_ids]))
         self._part_radius = jp.array(mj_model.geom_size[part_ids, 0])
@@ -671,19 +678,23 @@ class SafeBulletsHumanoid(SafeBullets):
 
     @property
     def default_spawn_height(self) -> float:
-        return 1.25
+        return 1.29
 
     @property
     def default_spawn_rotation(self) -> Tuple[float, float, float, float]:
-        # Rotate 90 degrees around y-axis to stand upright: quaternion [w, x, y, z]
-        return (0.707107, 0.0, 0.707107, 0.0)
+        # Identity quaternion - humanoid already faces +x in XML
+        return (1.0, 0.0, 0.0, 0.0)
 
     @property
     def default_healthy_z_range(self) -> Tuple[float, float]:
         return (0.6, 2.0)
 
     def _get_gear_for_backend(self, backend: str) -> jp.ndarray:
+        # 21 actuators: abdomen_y, abdomen_z, abdomen_x, right_hip_x, right_hip_z, right_hip_y,
+        # right_knee, left_hip_x, left_hip_z, left_hip_y, left_knee, right_shoulder1,
+        # right_shoulder2, right_elbow, left_shoulder1, left_shoulder2, left_elbow,
+        # right_ankle_y, right_ankle_x, left_ankle_y, left_ankle_x
         return jp.array([
             350.0, 350.0, 350.0, 350.0, 350.0, 350.0, 350.0, 350.0, 350.0, 350.0,
-            350.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0
+            350.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0,
         ])

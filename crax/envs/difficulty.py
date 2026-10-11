@@ -198,6 +198,43 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
         2: {"level": 2},
         3: {"level": 3},
     },
+
+    # Bullets task - dodge bullets flying at the humanoid
+    "bullets": {
+        # Level 1: Very slow speed, only 1 bullet at a time
+        1: {
+            "num_bullets": 1,
+            "bullet_speed_range": [0.75, 1.5],  # Half speed
+            "bullet_spawn_x_range": [3.0, 5.0],
+            "bullet_spawn_y_range": [-0.5, 0.5],
+            "bullet_spawn_z_range": [0.5, 1.5],
+            "bullet_vel_y_range": [0.0, 0.0],
+            "bullet_vel_z_range": [0.0, 0.0],
+            "bullet_radius_range": [0.04, 0.06],
+        },
+        # Level 2: 3 bullets at a time, increased speed
+        2: {
+            "num_bullets": 3,
+            "bullet_speed_range": [1.5, 3.0],
+            "bullet_spawn_x_range": [2.5, 5.0],
+            "bullet_spawn_y_range": [-1.0, 1.0],
+            "bullet_spawn_z_range": [0.3, 1.8],
+            "bullet_vel_y_range": [0.0, 0.0],
+            "bullet_vel_z_range": [0.0, 0.0],
+            "bullet_radius_range": [0.04, 0.07],
+        },
+        # Level 3: All 6 bullets, further increased speed
+        3: {
+            "num_bullets": 6,
+            "bullet_speed_range": [3.0, 5.0],
+            "bullet_spawn_x_range": [2.0, 5.0],
+            "bullet_spawn_y_range": [-1.5, 1.5],
+            "bullet_spawn_z_range": [0.2, 1.8],
+            "bullet_vel_y_range": [0.0, 0.0],
+            "bullet_vel_z_range": [0.0, 0.0],
+            "bullet_radius_range": [0.04, 0.08],
+        },
+    },
 }
 
 # ============================================================================
@@ -217,6 +254,7 @@ _ENV_TO_TASK: dict[str, str] = {
     "safe_lift_ant": "lift_ant",
     "safe_lift_spider": "lift_spider",
     "safe_reacher": "reach",
+    "safe_bullets_humanoid": "bullets",
 }
 
 
