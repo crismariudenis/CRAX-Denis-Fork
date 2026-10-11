@@ -2,11 +2,14 @@
     <compiler angle="degree" inertiafromgeom="true"/>
     <default>
         <joint armature="1" damping="1" limited="true"/>
-        <geom conaffinity="0" condim="3" contype="0" material="geom" rgba="0.4 0.33 0.26 1.0"/>
+        <!-- solref 0.01: stiffer contact than MuJoCo's 0.02, so the feet don't sink into the floor -->
+        <geom conaffinity="0" condim="3" contype="0" material="geom" rgba="0.4 0.33 0.26 1.0" solref="0.01 1"/>
         <motor ctrllimited="true" ctrlrange="-.4 .4"/>
     </default>
     <!-- Removed RK4 integrator for brax. -->
-    <option iterations="8" timestep="0.003" ls_iterations="6">
+    <!-- 32 solver iterations: with 8 the box feet's corner contacts didn't converge and the feet sank
+         in (54 mm with 8 and solref 0.02, ~5 mm with 32 and 0.01; scripts/dodge_foot_check.py) -->
+    <option iterations="32" timestep="0.003" ls_iterations="6">
         <!-- <flags solverstat="enable" energy="enable"/>-->
     </option>
     <custom>
@@ -74,7 +77,7 @@
                         <geom contype="1" fromto="0 0 0 0 0.01 -.34" name="right_thigh1" size="0.06" type="capsule"/>
                         <body name="right_shin" pos="0 0.01 -0.403">
                             <joint armature="0.0060" axis="0 -1 0" name="right_knee" pos="0 0 .02" range="-160 -2" type="hinge"/>
-                            <geom fromto="0 0 0 0 0 -.3" name="right_shin1" size="0.049" type="capsule"/>
+                            <geom contype="1" fromto="0 0 0 0 0 -.3" name="right_shin1" size="0.049" type="capsule"/>
                             <body name="right_foot" pos="0 0 -0.39">
                                 <joint armature="0.006" axis="0 1 0" damping="1" name="right_ankle_y" pos="0 0 .08" range="-50 50" stiffness="6" type="hinge"/>
                                 <joint armature="0.006" axis="1 0 .5" damping="1" name="right_ankle_x" pos="0 0 .08" range="-50 50" stiffness="3" type="hinge"/>
@@ -89,7 +92,7 @@
                         <geom contype="1" fromto="0 0 0 0 -0.01 -.34" name="left_thigh1" size="0.06" type="capsule"/>
                         <body name="left_shin" pos="0 -0.01 -0.403">
                             <joint armature="0.0060" axis="0 -1 0" name="left_knee" pos="0 0 .02" range="-160 -2" stiffness="1" type="hinge"/>
-                            <geom fromto="0 0 0 0 0 -.3" name="left_shin1" size="0.049" type="capsule"/>
+                            <geom contype="1" fromto="0 0 0 0 0 -.3" name="left_shin1" size="0.049" type="capsule"/>
                             <body name="left_foot" pos="0 0 -0.39">
                                 <joint armature="0.006" axis="0 1 0" damping="1" name="left_ankle_y" pos="0 0 .08" range="-50 50" stiffness="6" type="hinge"/>
                                 <joint armature="0.006" axis="1 0 .5" damping="1" name="left_ankle_x" pos="0 0 .08" range="-50 50" stiffness="3" type="hinge"/>

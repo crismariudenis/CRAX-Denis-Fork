@@ -12,8 +12,10 @@ Usage:
     python scripts/dodge_policy_videos.py --run models/<run_name> --steps 1000
     python scripts/dodge_policy_videos.py --stage 1 --levels 1  # stage 1's policy instead of the last
     python scripts/dodge_policy_videos.py --runs_dir models/<folder>   # every run in a folder (e.g. all seeds)
+    python scripts/dodge_policy_videos.py --env_kwargs '{"plane_height_range": [1.0, 1.5]}' --tag low
 """
 import argparse
+import json
 import os
 import sys
 import zlib
@@ -28,6 +30,7 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 import imageio.v3 as iio
 import jax
 import numpy as np
+from jax import numpy as jp
 from PIL import Image, ImageDraw, ImageFont
 
 from crax import envs
@@ -55,6 +58,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--width", type=int, default=640)
     p.add_argument("--height", type=int, default=480)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--env_kwargs", type=str, default="{}",
+                   help="JSON env settings that override the level's (see docs/DODGE.md section 4)")
+    p.add_argument("--tag", type=str, default=None,
+                   help="Added to the video names, so videos with --env_kwargs don't overwrite the plain ones")
     return p.parse_args()
 
 
@@ -110,8 +117,16 @@ def overlay_metrics(frames, returns, costs):
 
 def record_level(policy, level: int, args, out_prefix: str) -> None:
     """Plays the policy on one level for --steps and saves one video per camera."""
-    env = envs.get_environment(ENV_NAME, level=level)
+    env = envs.get_environment(ENV_NAME, level=level, **json.loads(args.env_kwargs))
     reset_fn, step_fn = jax.jit(env.reset), jax.jit(env.step)
+
+    # Lowest point of every body part's hitbox; below 0 = sunk into the floor
+    dodge = env.unwrapped
+
+    @jax.jit
+    def part_bottoms(pipeline_state):
+        center, axes = dodge._part_frames(pipeline_state)
+        return center[:, 2] - dodge._part_reach(axes, jp.array([0.0, 0.0, 1.0]))
 
     rng = jax.random.PRNGKey(args.seed)
     rng, reset_rng = jax.random.split(rng)
@@ -119,12 +134,14 @@ def record_level(policy, level: int, args, out_prefix: str) -> None:
     trajectory = [state.pipeline_state]
     total_reward, total_cost, falls = 0.0, 0.0, 0
     returns, costs = [total_reward], [total_cost]
+    lowest = np.asarray(part_bottoms(state.pipeline_state))
 
     for _ in range(args.steps):
         rng, act_rng = jax.random.split(rng)
         action, _ = policy(state.obs, act_rng)
         state = step_fn(state, action)
         trajectory.append(state.pipeline_state)
+        lowest = np.minimum(lowest, np.asarray(part_bottoms(state.pipeline_state)))
         total_reward += float(state.reward)
         total_cost += float(state.info["cost"])
         returns.append(total_reward)
@@ -137,6 +154,9 @@ def record_level(policy, level: int, args, out_prefix: str) -> None:
             total_reward, total_cost = 0.0, 0.0
 
     print(f"level {level}: {args.steps} steps, {falls} falls")
+    sunk = [(depth, name) for depth, name in sorted(zip(lowest, dodge._part_names)) if depth < 0.0]
+    print("  deepest into the floor: " + (", ".join(f"{name} {-depth * 1000:.1f} mm" for depth, name in sunk)
+                                          if sunk else "nothing"))
     for camera in args.cameras:
         frames = env.render(trajectory, height=args.height, width=args.width, camera=camera)
         frames = overlay_metrics(frames, returns, costs)
@@ -156,6 +176,8 @@ def main() -> None:
         out_prefix = f"sd_{zlib.crc32(run_dir.name.encode()) & 0xFFFF:04x}"
         if args.stage is not None:
             out_prefix += f"_stage{args.stage}"
+        if args.tag:
+            out_prefix += f"_{args.tag}"
         print(f"video names: {out_prefix}_lvl<level>_<camera>.mp4  (id {out_prefix[3:]} = {run_dir.name})")
         for level in args.levels:
             record_level(policy, level, args, out_prefix=out_prefix)

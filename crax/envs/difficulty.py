@@ -156,12 +156,12 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
         # Level 1: Stand upright on the platform, no plane and no fall cost
         1: {"plane_enabled": False, "fall_cost": 0.0, "upright_reward_weight": 5.0},
         # Level 2: Still plane at a random height, tilt and offset
-        2: {"plane_enabled": True, "plane_height_range": [1.2, 1.9], "plane_tilt_range": 30.0,
+        2: {"plane_enabled": True, "plane_height_range": [1.0, 1.9], "plane_tilt_range": 30.0,
             "plane_offset_range": 0.3},
         # Level 3: 1.5 m square planes fly through from random directions, one every ~2.7 s
         3: {"plane_enabled": True, "plane_slide_speed": 1.5, "plane_slide_distance": 2.0,
             "plane_half_size": 0.75, "plane_repeat": True, "plane_tilt_range": 20.0,
-            "plane_height_range": [1.2, 1.7]},
+            "plane_height_range": [1.0, 1.7]},
     },
 
     # Lift task for Ant - keep certain feet off the ground

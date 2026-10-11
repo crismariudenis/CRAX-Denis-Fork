@@ -100,6 +100,7 @@ class SafeDodge(PipelineEnv, ABC):
             plane_repeat: bool = False,
             platform_radius: float = 0.75,
             episode_length: int = 1000,
+            solver_iterations: Optional[int] = None,
             backend: str = 'generalized',
             **kwargs,
     ):
@@ -128,6 +129,7 @@ class SafeDodge(PipelineEnv, ABC):
             plane_repeat: Start a new pass each time the sliding plane has gone past.
             platform_radius: Radius of the platform; a part on the floor past it is a fall.
             episode_length: Maximum number of steps per episode.
+            solver_iterations: Contact/limit solver iterations ('generalized'); None keeps the XML's.
             backend: Physics backend ('generalized', 'spring', 'positional', 'mjx').
         """
         plane_point = np.asarray(plane_point, dtype=np.float64)
@@ -183,6 +185,8 @@ class SafeDodge(PipelineEnv, ABC):
 
         # Parse the modified XML
         sys = mjcf.loads(xml_string)
+        if solver_iterations is not None:
+            sys = sys.replace(solver_iterations=int(solver_iterations))
 
         n_frames = 5
 
@@ -241,6 +245,7 @@ class SafeDodge(PipelineEnv, ABC):
                                 int(mujoco.mjtGeom.mjGEOM_BOX))
         if not np.all(np.isin(part_types, (sphere, capsule, box))):
             raise ValueError('SafeDodge agents may only use sphere, capsule and box geoms.')
+        self._part_names = tuple(mujoco.mj_id2name(mj_model, mujoco.mjtObj.mjOBJ_GEOM, int(g)) for g in part_ids)
         self._part_link = jp.array(mj_model.geom_bodyid[part_ids] - 1)
         self._part_pos = jp.array(mj_model.geom_pos[part_ids])
         # Each hitbox is a box grown by a radius (sphere: point, capsule: segment, box: radius 0)
