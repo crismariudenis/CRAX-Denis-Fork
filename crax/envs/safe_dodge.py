@@ -41,14 +41,24 @@ from crax.io import mjcf
 
 
 @struct.dataclass
+class Plane:
+    """A square hazard plane. It is not part of the physics: SafeDodge.step moves it."""
+    pos: jax.Array  # (3,) centre
+    rot: jax.Array  # (4,) quaternion; the plane's normal is its z axis
+    vel: jax.Array  # (3,) linear velocity (the plane never rotates during a pass)
+
+    def axes(self) -> jax.Array:
+        """(3, 3) rows: the square's two side directions and its unit normal, in world coordinates."""
+        return jax.vmap(brax_math.rotate, in_axes=(0, None))(jp.eye(3), self.rot)
+
+
+@struct.dataclass
 class DodgeState(generalized_base.State):
-    """The physics state plus the hazard plane, which moves outside the physics.
+    """The physics state plus the hazard plane.
 
     Keeping the plane in the pipeline state means every renderer gets it with the frames.
     """
-    plane_pos: jax.Array  # (3,) centre
-    plane_rot: jax.Array  # (4,) quaternion; the plane's normal is its z axis
-    plane_vel: jax.Array  # (3,) linear velocity (the plane never rotates during a pass)
+    plane: Plane
 
 
 class SafeDodge(PipelineEnv, ABC):
@@ -96,7 +106,6 @@ class SafeDodge(PipelineEnv, ABC):
             terminate_when_unhealthy=True,
             healthy_z_range: Optional[Tuple[float, float]] = None,
             reset_noise_scale=1e-2,
-            plane_point: Tuple[float, float, float] = (0.0, 0.0, 1.3),
             plane_cost_weight: float = 1.25,
             fall_cost: float = 25.0,
             plane_tilt_range: float = 90.0,
@@ -104,9 +113,8 @@ class SafeDodge(PipelineEnv, ABC):
             plane_slide_speed: float = 0.0,
             plane_slide_distance: float = 1.5,
             plane_offset_range: float = 0.0,
-            plane_height_range: Optional[Tuple[float, float]] = None,
+            plane_height_range: Tuple[float, float] = (1.3, 1.3),
             plane_half_size: Optional[float] = None,
-            plane_repeat: bool = False,
             platform_radius: float = 0.75,
             episode_length: int = 1000,
             solver_iterations: Optional[int] = None,
@@ -124,17 +132,16 @@ class SafeDodge(PipelineEnv, ABC):
             terminate_when_unhealthy: Whether to terminate episode when unhealthy.
             healthy_z_range: (min, max) z-range for healthy state.
             reset_noise_scale: Scale of noise added to initial state.
-            plane_point: Centre [x, y, z] of the untilted, unmoved (horizontal) hazard plane.
             plane_cost_weight: Cost per metre of hitbox overlap with the plane.
             fall_cost: Cost added when the agent falls.
             plane_tilt_range: Max random tilt of the plane per axis, in degrees.
             plane_enabled: False hides the plane and makes its cost 0.
-            plane_slide_speed: Horizontal speed of the plane in m/s (0 = still).
-            plane_slide_distance: Distance from plane_point where the sliding plane starts.
-            plane_offset_range: Max random horizontal offset of the plane from plane_point.
-            plane_height_range: (low, high) random plane height; None keeps plane_point's.
+            plane_slide_speed: Horizontal speed of the plane in m/s (0 = still). A sliding plane
+                starts a new pass each time it has gone past.
+            plane_slide_distance: Distance from the platform centre where the sliding plane starts.
+            plane_offset_range: Max random horizontal offset of the plane from the platform centre.
+            plane_height_range: (low, high) random height of the plane's centre.
             plane_half_size: Half the side of the square plane; None covers the platform.
-            plane_repeat: Start a new pass each time the sliding plane has gone past.
             platform_radius: Radius of the platform; a part on the floor past it is a fall.
             episode_length: Maximum number of steps per episode.
             solver_iterations: Contact/limit solver iterations ('generalized'); None keeps the XML's.
@@ -142,7 +149,6 @@ class SafeDodge(PipelineEnv, ABC):
         """
         if backend != 'generalized':
             raise ValueError(f"safe_dodge only supports the 'generalized' backend, not {backend!r}.")
-        plane_point = np.asarray(plane_point, dtype=np.float64)
         self._plane_cost_weight = plane_cost_weight if plane_enabled else 0.0
         self._fall_cost = fall_cost
         if not 0.0 <= plane_tilt_range <= 90.0:
@@ -153,14 +159,9 @@ class SafeDodge(PipelineEnv, ABC):
         self._plane_slide_speed = plane_slide_speed
         self._plane_slide_distance = plane_slide_distance if plane_slide_speed > 0.0 else 0.0
         self._plane_offset_range = plane_offset_range
-        if plane_height_range is None:
-            plane_height_range = (plane_point[2], plane_point[2])
         if not 0.0 < plane_height_range[0] <= plane_height_range[1]:
             raise ValueError('plane_height_range must be (low, high) with 0 < low <= high.')
         self._plane_height_range = (float(plane_height_range[0]), float(plane_height_range[1]))
-        if plane_repeat and plane_slide_speed <= 0.0:
-            raise ValueError('plane_repeat needs a sliding plane (plane_slide_speed > 0).')
-        self._plane_repeat = plane_repeat
         if platform_radius <= 0.0:
             raise ValueError('platform_radius must be positive.')
         self._platform_radius = platform_radius
@@ -171,18 +172,13 @@ class SafeDodge(PipelineEnv, ABC):
         if healthy_z_range[0] >= self.default_spawn_height:
             raise ValueError('healthy_z_range min must be below the spawn height.')
 
-        # The plane is data, not physics: a centre, a rotation and a velocity, moved by step() itself
-        self._plane_point = jp.array(plane_point)
-
         # Load XML and size the hazard plane and platform
         path = epath.resource_path('crax') / self.agent_xml_path
         xml_string = path.read_text()
         xml_string = xml_string.replace('PLATFORM_RADIUS', str(float(platform_radius)))
         # By default the plane reaches the platform's edge at any tilt
         if plane_half_size is None:
-            plane_half_size = np.hypot(
-                platform_radius + np.linalg.norm(plane_point[:2]) + plane_offset_range,
-                max(plane_point[2], self._plane_height_range[1]))
+            plane_half_size = np.hypot(platform_radius + plane_offset_range, self._plane_height_range[1])
         self._plane_half_size = float(plane_half_size)
         xml_string = xml_string.replace('PLANE_HALF_SIZE', str(self._plane_half_size))
         # Group 3 is hidden in renders
@@ -243,11 +239,12 @@ class SafeDodge(PipelineEnv, ABC):
 
         # Store previous state for velocity calculation
         pipeline_state0 = state.pipeline_state
-        pipeline_state = self.pipeline_step(pipeline_state0, action).replace(
-            plane_pos=pipeline_state0.plane_pos + pipeline_state0.plane_vel * self.dt)
+        plane = pipeline_state0.plane
+        plane = plane.replace(pos=plane.pos + plane.vel * self.dt)
         new_info = dict(state.info)
-        if self._plane_repeat:
-            pipeline_state, new_info["plane_rng"] = self._next_pass(pipeline_state, state.info["plane_rng"])
+        if self._plane_slide_speed > 0.0:
+            plane, new_info["plane_rng"] = self._next_pass(plane, state.info["plane_rng"])
+        pipeline_state = self.pipeline_step(pipeline_state0, action).replace(plane=plane)
 
         # Healthy reward
         min_z, _ = self._healthy_z_range
@@ -288,8 +285,7 @@ class SafeDodge(PipelineEnv, ABC):
         })
         state.metrics.update(metrics)
 
-        # Update info dictionary with cost
-        new_info.update({k: metrics[k] for k in self._INFO_KEYS})
+        new_info["cost"] = metrics["cost"]
 
         return state.replace(
             pipeline_state=pipeline_state, obs=obs, reward=reward, done=done, info=new_info
@@ -314,9 +310,8 @@ class SafeDodge(PipelineEnv, ABC):
 
         # Random plane for this episode
         physics = self.pipeline_init(qpos, qvel)
-        plane_pos, plane_rot, plane_vel = self._sample_plane(rng3)
         pipeline_state = DodgeState(**{f.name: getattr(physics, f.name) for f in dataclasses.fields(physics)},
-                                    plane_pos=plane_pos, plane_rot=plane_rot, plane_vel=plane_vel)
+                                    plane=self._sample_plane(rng3))
         obs = self._get_obs(pipeline_state, jp.zeros(self.sys.act_size()))
         reward, done, zero = jp.zeros(3)
 
@@ -324,12 +319,11 @@ class SafeDodge(PipelineEnv, ABC):
                                      'reward_quadctrl')}
         metrics = jax.tree_util.tree_map(
             jp.zeros_like, self._metrics(pipeline_state, pipeline_state, rewards))
-        info = {k: metrics[k] for k in self._INFO_KEYS}
-        info["plane_rng"] = rng4
+        info = {"cost": metrics["cost"], "plane_rng": rng4}
 
         return State(pipeline_state, obs, reward, done, metrics, info)
 
-    def _sample_plane(self, rng: jax.Array) -> Tuple[jax.Array, jax.Array, jax.Array]:
+    def _sample_plane(self, rng: jax.Array) -> Plane:
         """The plane at the start of a new pass: random tilt, height, position and slide."""
         rng_tilt, rng_slide, rng_pos = jax.random.split(rng, 3)
         tilt_x, tilt_y = self._sample_plane_tilt(rng_tilt)
@@ -337,21 +331,15 @@ class SafeDodge(PipelineEnv, ABC):
                                  brax_math.quat_rot_axis(jp.array([0.0, 1.0, 0.0]), tilt_y))
         slide_offset, slide_velocity = self._sample_plane_slide(rng_slide)
         pos = self._sample_plane_position(rng_pos) + jp.append(slide_offset, 0.0)
-        return pos, rot, jp.append(slide_velocity, 0.0)
+        return Plane(pos=pos, rot=rot, vel=jp.append(slide_velocity, 0.0))
 
-    def _next_pass(self, pipeline_state: DodgeState, rng: jax.Array) -> Tuple[DodgeState, jax.Array]:
-        """Starts a new pass once the sliding plane has gone past plane_point."""
+    def _next_pass(self, plane: Plane, rng: jax.Array) -> Tuple[Plane, jax.Array]:
+        """A new plane once the sliding one has gone past the platform centre."""
         rng, pass_rng = jax.random.split(rng)
-        slide = pipeline_state.plane_pos[:2] - self._plane_point[:2]
-        slide_vel = pipeline_state.plane_vel[:2]
-        direction = slide_vel / jp.maximum(jp.linalg.norm(slide_vel), 1e-6)
-        passed = slide @ direction >= self._plane_slide_distance + self._plane_offset_range
-        pos, rot, vel = self._sample_plane(pass_rng)
-        return pipeline_state.replace(
-            plane_pos=jp.where(passed, pos, pipeline_state.plane_pos),
-            plane_rot=jp.where(passed, rot, pipeline_state.plane_rot),
-            plane_vel=jp.where(passed, vel, pipeline_state.plane_vel),
-        ), rng
+        direction = plane.vel[:2] / jp.maximum(jp.linalg.norm(plane.vel[:2]), 1e-6)
+        passed = plane.pos[:2] @ direction >= self._plane_slide_distance + self._plane_offset_range
+        new_plane = self._sample_plane(pass_rng)
+        return jax.tree.map(lambda new, old: jp.where(passed, new, old), new_plane, plane), rng
 
     def _is_healthy(self, pipeline_state: base.State) -> jax.Array:
         """1.0 unless the torso is out of healthy_z_range or the agent is off the platform."""
@@ -388,14 +376,13 @@ class SafeDodge(PipelineEnv, ABC):
         return jax.random.uniform(rng, (2,), minval=-r, maxval=r)
 
     def _sample_plane_position(self, rng: jax.Array) -> jax.Array:
-        """Random plane centre [x, y, z]: within plane_offset_range of plane_point, at a random height."""
+        """Random plane centre [x, y, z]: within plane_offset_range of the platform centre, at a random height."""
         rng_r, rng_a, rng_h = jax.random.split(rng, 3)
         radius = self._plane_offset_range * jp.sqrt(jax.random.uniform(rng_r, ()))
         angle = jax.random.uniform(rng_a, (), minval=0.0, maxval=2 * jp.pi)
         low, high = self._plane_height_range
         height = jax.random.uniform(rng_h, (), minval=low, maxval=high)
-        return jp.array([self._plane_point[0] + radius * jp.cos(angle),
-                         self._plane_point[1] + radius * jp.sin(angle), height])
+        return jp.array([radius * jp.cos(angle), radius * jp.sin(angle), height])
 
     def _sample_plane_slide(self, rng: jax.Array) -> Tuple[jax.Array, jax.Array]:
         """Random plane start offset [x, y] and velocity [x, y]."""
@@ -433,8 +420,8 @@ class SafeDodge(PipelineEnv, ABC):
 
         def get_image(i: int, state: base.State) -> np.ndarray:
             d.qpos, d.qvel = state.q, state.qd
-            d.mocap_pos[self._plane_mocap] = state.plane_pos
-            d.mocap_quat[self._plane_mocap] = state.plane_rot
+            d.mocap_pos[self._plane_mocap] = state.plane.pos
+            d.mocap_quat[self._plane_mocap] = state.plane.rot
             mujoco.mj_forward(mj_model, d)
             if orbit:
                 cam.azimuth = self._ORBIT_SPEED * i * self.dt
@@ -448,19 +435,12 @@ class SafeDodge(PipelineEnv, ABC):
         renderer.close()
         return frames
 
-    def _plane_frame(self, pipeline_state: base.State) -> Tuple[jax.Array, jax.Array]:
-        """Current plane centre and unit normal in world coordinates."""
-        normal = brax_math.rotate(jp.array([0.0, 0.0, 1.0]), pipeline_state.plane_rot)
-        return pipeline_state.plane_pos, normal
-
-    def _part_overlaps(self, pipeline_state: base.State) -> jax.Array:
+    def _part_overlaps(self, pipeline_state: DodgeState) -> jax.Array:
         """How deep each hitbox cuts into the square plane in metres (<= 0: gap, no contact)."""
-        plane_pos, normal = self._plane_frame(pipeline_state)
-        plane_rot = pipeline_state.plane_rot
-        side_u = brax_math.rotate(jp.array([1.0, 0.0, 0.0]), plane_rot)
-        side_v = brax_math.rotate(jp.array([0.0, 1.0, 0.0]), plane_rot)
+        plane = pipeline_state.plane
+        side_u, side_v, normal = plane.axes()
         center, axes = self._part_frames(pipeline_state)
-        offset = center - plane_pos
+        offset = center - plane.pos
         reach = lambda direction: self._part_reach(axes, direction)
 
         depth = reach(normal) - jp.abs(offset @ normal)
@@ -483,9 +463,6 @@ class SafeDodge(PipelineEnv, ABC):
             'fall_cost': fall_cost,
             'cost': plane_cost + fall_cost,
         }
-
-    # Metrics that are also copied into state.info each step.
-    _INFO_KEYS = ('cost', 'plane_distance', 'plane_violation', 'fall_cost')
 
     def _metrics(
             self, pipeline_state0: base.State, pipeline_state: base.State, rewards: dict,
@@ -547,12 +524,13 @@ class SafeDodge(PipelineEnv, ABC):
             self._platform_obs(pipeline_state),
         ])
 
-    def _plane_obs(self, pipeline_state: base.State) -> jax.Array:
+    def _plane_obs(self, pipeline_state: DodgeState) -> jax.Array:
         """Plane offset, normal (toward the torso), distance and velocity, relative to the torso."""
-        plane_pos, normal = self._plane_frame(pipeline_state)
-        offset = plane_pos - pipeline_state.x.pos[0]
+        plane = pipeline_state.plane
+        normal = plane.axes()[2]
+        offset = plane.pos - pipeline_state.x.pos[0]
         normal = jp.where(jp.dot(-offset, normal) >= 0.0, 1.0, -1.0) * normal
-        return jp.concatenate([offset, normal, jp.dot(-offset, normal)[None], pipeline_state.plane_vel])
+        return jp.concatenate([offset, normal, jp.dot(-offset, normal)[None], plane.vel])
 
     def _platform_obs(self, pipeline_state: base.State) -> jax.Array:
         """Torso x, y, platform radius and torso distance to the edge."""

@@ -160,7 +160,7 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
             "plane_offset_range": 0.3},
         # Level 3: 1.5 m square planes fly through from random directions, one every ~2.7 s
         3: {"plane_enabled": True, "plane_slide_speed": 1.5, "plane_slide_distance": 2.0,
-            "plane_half_size": 0.75, "plane_repeat": True, "plane_tilt_range": 20.0,
+            "plane_half_size": 0.75, "plane_tilt_range": 20.0,
             "plane_height_range": [1.0, 1.7]},
     },
 
