@@ -153,8 +153,11 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
 
     # Dodge task - keep every body part out of a tilted hazard plane
     "dodge": {
-        # Level 1: Stand upright on the platform, no plane and no fall cost
-        1: {"plane_enabled": False, "fall_cost": 0.0, "upright_reward_weight": 5.0},
+        # Level 1: Stand upright on the platform, no plane and no fall cost. The hidden plane moves like
+        # level 2's, so the observation normalizer already knows the plane's ranges when it appears
+        1: {"plane_enabled": False, "fall_cost": 0.0, "upright_reward_weight": 5.0,
+            "plane_height_range": [1.0, 1.9], "plane_tilt_range": 30.0, "plane_offset_range": 0.3,
+            "plane_resample_interval": 250, "plane_drop_speed": 0.75},
         # Level 2: Every 3.75 s a plane at a random height, tilt and offset comes down from above and stops
         2: {"plane_enabled": True, "plane_height_range": [1.0, 1.9], "plane_tilt_range": 30.0,
             "plane_offset_range": 0.3, "plane_resample_interval": 250, "plane_drop_speed": 0.75},
