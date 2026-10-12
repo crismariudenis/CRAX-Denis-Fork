@@ -13,18 +13,10 @@
         <!-- <flags solverstat="enable" energy="enable"/>-->
     </option>
     <custom>
-        <!-- brax custom params -->
-        <numeric data="2500" name="constraint_limit_stiffness"/>
-        <numeric data="27000" name="constraint_stiffness"/>
-        <numeric data="30" name="constraint_ang_damping"/>
-        <numeric data="80" name="constraint_vel_damping"/>
-        <numeric data="0.5" name="joint_scale_pos"/>
-        <numeric data="0.1" name="joint_scale_ang"/>
-        <numeric data="-0.05" name="ang_damping"/>
-        <numeric data="0" name="spring_mass_scale"/>
-        <numeric data="1" name="spring_inertia_scale"/>
-        <!-- 0: exact inverse mass matrix. The plane's joints make Brax's approximate one wrong for the humanoid too -->
-        <numeric data="0" name="matrix_inv_iterations"/>
+        <!-- brax custom params ('generalized' only reads these two) -->
+        <!-- Brax humanoid's approximate inverse mass matrix. It was 0 (exact) while the plane had
+             joints in the physics: they made the approximation wrong for the humanoid too -->
+        <numeric data="20" name="matrix_inv_iterations"/>
         <numeric data="15" name="solver_maxls"/>
     </custom>
     <size nkey="5" nuser_geom="1"/>
@@ -125,19 +117,11 @@
             </body>
         </body>
 
-        <!-- Hazard plane, visual only. Must come after the humanoid so the torso stays link 0.
-             SafeDodge sets its slide, height and tilt; the large armature keeps it from sinking -->
-        <body name="plane_slider" pos="PLANE_POS">
-            <joint name="plane_slide_x" type="slide" axis="1 0 0" limited="false" armature="0" damping="0"/>
-            <joint name="plane_slide_y" type="slide" axis="0 1 0" limited="false" armature="0" damping="0"/>
-            <joint name="plane_slide_z" type="slide" axis="0 0 1" limited="false" armature="1000" damping="0"/>
-            <inertial pos="0 0 0" mass="0.001" diaginertia="1e-6 1e-6 1e-6"/>
-            <body name="hazard_plane" zaxis="PLANE_NORMAL">
-                <joint name="plane_tilt_x" type="hinge" axis="1 0 0" limited="false"/>
-                <joint name="plane_tilt_y" type="hinge" axis="0 1 0" limited="false"/>
-                <geom name="hazard_plane" type="box" size="PLANE_HALF_SIZE PLANE_HALF_SIZE 0.002" mass="0.001"
-                      rgba="1.0 0.2 0.2 0.4" contype="0" conaffinity="0" group="PLANE_GROUP"/>
-            </body>
+        <!-- Hazard plane, only in renders: SafeDodge removes it from the physics, moves it itself
+             and places this mocap body at the plane's pose in every frame -->
+        <body name="hazard_plane" mocap="true">
+            <geom name="hazard_plane" type="box" size="PLANE_HALF_SIZE PLANE_HALF_SIZE 0.002"
+                  rgba="1.0 0.2 0.2 0.4" contype="0" conaffinity="0" group="PLANE_GROUP"/>
         </body>
     </worldbody>
     <sensor>
