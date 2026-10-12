@@ -80,9 +80,10 @@ class SafeBullets(PipelineEnv, ABC):
         pass
 
     def _get_bullet_pos_vel(self, pipeline_state: base.State) -> Tuple[jax.Array, jax.Array]:
-        """Get bullet positions and velocities as 2D arrays (num_bullets, 3).
+        """Get bullet positions and velocities as 2D arrays (6, 3) for all 6 bullets.
 
         Uses jp.take with explicit axis to ensure 2D output shape.
+        Returns all 6 bullets; callers should slice to self._num_bullets if needed.
         """
         bullet_links_array = jp.array(self._bullet_links_list, dtype=jp.int32)
         # Get the full position/velocity arrays first
@@ -91,9 +92,9 @@ class SafeBullets(PipelineEnv, ABC):
         # Use jp.take with explicit axis and mode to ensure 2D output
         bullet_pos = jp.take(all_pos, jp.array(self._bullet_links_list, dtype=jp.int32), axis=0, mode='clip')
         bullet_vel = jp.take(all_vel, jp.array(self._bullet_links_list, dtype=jp.int32), axis=0, mode='clip')
-        # Ensure 2D shape (num_bullets, 3) - explicitly reshape
-        bullet_pos = jp.reshape(bullet_pos, (self._num_bullets, 3))
-        bullet_vel = jp.reshape(bullet_vel, (self._num_bullets, 3))
+        # Ensure 2D shape (6, 3) - explicitly reshape
+        bullet_pos = jp.reshape(bullet_pos, (6, 3))
+        bullet_vel = jp.reshape(bullet_vel, (6, 3))
         return bullet_pos, bullet_vel
 
     def __init__(
@@ -220,10 +221,11 @@ class SafeBullets(PipelineEnv, ABC):
         # Find bullet body/mocap indices from the system
         self._find_bullet_indices()
 
-        # Agent's own slice of the physics state: everything but the bullets
+        # Agent's own slice of the physics state: everything but ALL bullet bodies
+        # Exclude all 6 bullet bodies to keep observation dimensions consistent across difficulty levels
+        # Hidden bullets still have slide joints controlled by the bullet system (staying at 0)
         mj_model = self.sys.mj_model
-        # Use bullet slider bodies (which are the bullet bodies with geoms and slide joints)
-        bullet_bodies = self._bullet_slider_body_ids
+        bullet_bodies = self._bullet_slider_body_ids  # All 6 bullet bodies
         self._agent_q = jp.array(np.setdiff1d(np.arange(self.sys.q_size()), mj_model.jnt_qposadr[bullet_bodies]))
         self._agent_qd = jp.array(np.setdiff1d(np.arange(self.sys.qd_size()), mj_model.jnt_dofadr[bullet_bodies]))
         self._agent_links = jp.array([i for i in range(self.sys.num_links()) if i + 1 not in bullet_bodies])
@@ -250,6 +252,9 @@ class SafeBullets(PipelineEnv, ABC):
         The bullet geoms are attached to the slider bodies (bullet{i}_slider)
         because the child bodies without joints get welded to their parent.
         So the slider bodies ARE the bullet bodies for rendering and collision.
+        
+        Always finds all 6 bullet bodies regardless of self._num_bullets to keep
+        observation dimensions consistent across difficulty levels.
         """
         mj_model = self.sys.mj_model
         body_id = lambda name: mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, name)
@@ -257,16 +262,18 @@ class SafeBullets(PipelineEnv, ABC):
         
         # Bullet slider bodies (parents with slide joints) - these ARE the bullet bodies
         # because the child bodies get welded to them and their geoms are attached here
-        self._bullet_slider_body_ids = [body_id(f'bullet{i}_slider') for i in range(self._num_bullets)]
+        # Always find all 6 bullet bodies to keep observation dimensions consistent
+        self._bullet_slider_body_ids = [body_id(f'bullet{i}_slider') for i in range(6)]
         self._bullet_body_ids = self._bullet_slider_body_ids  # Same bodies
         
         # Bullet slide joints (x, y, z) - these are the qpos/qvel addresses for bullet positions
-        self._bullet_slide_x_q = jp.array([mj_model.jnt_qposadr[joint_id(f'bullet{i}_slide_x')] for i in range(self._num_bullets)])
-        self._bullet_slide_y_q = jp.array([mj_model.jnt_qposadr[joint_id(f'bullet{i}_slide_y')] for i in range(self._num_bullets)])
-        self._bullet_slide_z_q = jp.array([mj_model.jnt_qposadr[joint_id(f'bullet{i}_slide_z')] for i in range(self._num_bullets)])
-        self._bullet_slide_x_qd = jp.array([mj_model.jnt_dofadr[joint_id(f'bullet{i}_slide_x')] for i in range(self._num_bullets)])
-        self._bullet_slide_y_qd = jp.array([mj_model.jnt_dofadr[joint_id(f'bullet{i}_slide_y')] for i in range(self._num_bullets)])
-        self._bullet_slide_z_qd = jp.array([mj_model.jnt_dofadr[joint_id(f'bullet{i}_slide_z')] for i in range(self._num_bullets)])
+        # Always get all 6 bullet joints
+        self._bullet_slide_x_q = jp.array([mj_model.jnt_qposadr[joint_id(f'bullet{i}_slide_x')] for i in range(6)])
+        self._bullet_slide_y_q = jp.array([mj_model.jnt_qposadr[joint_id(f'bullet{i}_slide_y')] for i in range(6)])
+        self._bullet_slide_z_q = jp.array([mj_model.jnt_qposadr[joint_id(f'bullet{i}_slide_z')] for i in range(6)])
+        self._bullet_slide_x_qd = jp.array([mj_model.jnt_dofadr[joint_id(f'bullet{i}_slide_x')] for i in range(6)])
+        self._bullet_slide_y_qd = jp.array([mj_model.jnt_dofadr[joint_id(f'bullet{i}_slide_y')] for i in range(6)])
+        self._bullet_slide_z_qd = jp.array([mj_model.jnt_dofadr[joint_id(f'bullet{i}_slide_z')] for i in range(6)])
         
         # Bullet links in Brax (link i = MuJoCo body i + 1, so MuJoCo body b = Brax link b-1)
         self._bullet_links = jp.array([bid - 1 for bid in self._bullet_body_ids])
@@ -340,7 +347,10 @@ class SafeBullets(PipelineEnv, ABC):
         """
         dt = self.dt
         # Current bullet positions from mocap - use helper method for proper JAX indexing
-        bullet_pos, bullet_vel = self._get_bullet_pos_vel(pipeline_state)
+        # Get all 6 bullets, but only use the first self._num_bullets
+        all_bullet_pos, all_bullet_vel = self._get_bullet_pos_vel(pipeline_state)
+        bullet_pos = all_bullet_pos[:self._num_bullets]
+        bullet_vel = all_bullet_vel[:self._num_bullets]
 
         # Update positions: constant velocity
         new_pos = bullet_pos + bullet_vel * dt
@@ -358,23 +368,28 @@ class SafeBullets(PipelineEnv, ABC):
         new_pos = jp.where(needs_reset[:, None], new_positions, new_pos)
         new_vel = jp.where(needs_reset[:, None], new_velocities, bullet_vel)
 
+        # Create full 6-bullet arrays for updating pipeline state
+        # Only the first self._num_bullets are updated; the rest stay at their current positions
+        full_new_pos = all_bullet_pos.at[:self._num_bullets].set(new_pos)
+        full_new_vel = all_bullet_vel.at[:self._num_bullets].set(new_vel)
+
         # Update the pipeline state
         # Bullet positions are in qpos at slide joint addresses
         qpos = pipeline_state.q
         qvel = pipeline_state.qd
 
-        for i in range(self._num_bullets):
-            qpos = qpos.at[self._bullet_slide_x_q[i]].set(new_pos[i, 0])
-            qpos = qpos.at[self._bullet_slide_y_q[i]].set(new_pos[i, 1])
-            qpos = qpos.at[self._bullet_slide_z_q[i]].set(new_pos[i, 2])
-            qvel = qvel.at[self._bullet_slide_x_qd[i]].set(new_vel[i, 0])
-            qvel = qvel.at[self._bullet_slide_y_qd[i]].set(new_vel[i, 1])
-            qvel = qvel.at[self._bullet_slide_z_qd[i]].set(new_vel[i, 2])
+        for i in range(6):
+            qpos = qpos.at[self._bullet_slide_x_q[i]].set(full_new_pos[i, 0])
+            qpos = qpos.at[self._bullet_slide_y_q[i]].set(full_new_pos[i, 1])
+            qpos = qpos.at[self._bullet_slide_z_q[i]].set(full_new_pos[i, 2])
+            qvel = qvel.at[self._bullet_slide_x_qd[i]].set(full_new_vel[i, 0])
+            qvel = qvel.at[self._bullet_slide_y_qd[i]].set(full_new_vel[i, 1])
+            qvel = qvel.at[self._bullet_slide_z_qd[i]].set(full_new_vel[i, 2])
 
         # Also update xpos/xvel in the pipeline state
         bullet_links_array = jp.array(self._bullet_links_list, dtype=jp.int32)
-        x_pos = pipeline_state.x.pos.at[jp.array(self._bullet_links_list, dtype=jp.int32)].set(new_pos)
-        x_vel = pipeline_state.xd.vel.at[jp.array(self._bullet_links_list, dtype=jp.int32)].set(new_vel)
+        x_pos = pipeline_state.x.pos.at[jp.array(self._bullet_links_list, dtype=jp.int32)].set(full_new_pos)
+        x_vel = pipeline_state.xd.vel.at[jp.array(self._bullet_links_list, dtype=jp.int32)].set(full_new_vel)
 
         return pipeline_state.replace(q=qpos, qd=qvel, x=pipeline_state.x.replace(pos=x_pos),
                                        xd=pipeline_state.xd.replace(vel=x_vel))
@@ -387,7 +402,8 @@ class SafeBullets(PipelineEnv, ABC):
             <= 0 means gap (negative = distance to surface).
         """
         # Bullet positions and radii - use helper method for proper JAX indexing
-        bullet_pos, _ = self._get_bullet_pos_vel(pipeline_state)
+        all_bullet_pos, _ = self._get_bullet_pos_vel(pipeline_state)
+        bullet_pos = all_bullet_pos[:self._num_bullets]
         # Bullet radii are stored in geom_size of bullet geoms
         mj_model = self.sys.mj_model
         geom_id = lambda name: mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, name)
@@ -438,7 +454,9 @@ class SafeBullets(PipelineEnv, ABC):
         torso_vel = pipeline_state.xd.vel[0]
 
         # Use helper method for proper JAX indexing
-        bullet_pos, bullet_vel = self._get_bullet_pos_vel(pipeline_state)
+        all_bullet_pos, all_bullet_vel = self._get_bullet_pos_vel(pipeline_state)
+        bullet_pos = all_bullet_pos[:self._num_bullets]
+        bullet_vel = all_bullet_vel[:self._num_bullets]
 
         rel_pos = bullet_pos - torso_pos  # (num_bullets, 3)
         rel_vel = bullet_vel - torso_vel  # (num_bullets, 3)
@@ -542,13 +560,19 @@ class SafeBullets(PipelineEnv, ABC):
             self.sys, action, pipeline_state.q, pipeline_state.qd
         )[self._agent_qd]
 
+        # Pad bullet observations to fixed size (6 bullets * 6 dims = 36) for consistent obs dim across levels
+        bullet_obs = self._bullet_obs(pipeline_state)
+        max_bullet_obs_dim = 6 * 6  # 6 bullets * 6 dims each
+        if bullet_obs.shape[0] < max_bullet_obs_dim:
+            bullet_obs = jp.pad(bullet_obs, (0, max_bullet_obs_dim - bullet_obs.shape[0]))
+
         return jp.concatenate([
             position,
             velocity,
             com_inertia.ravel(),
             com_velocity.ravel(),
             qfrc_actuator,
-            self._bullet_obs(pipeline_state),
+            bullet_obs,
             self._platform_obs(pipeline_state),
         ])
 
