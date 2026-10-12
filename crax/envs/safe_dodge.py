@@ -46,6 +46,7 @@ class Plane:
     pos: jax.Array  # (3,) centre
     rot: jax.Array  # (4,) quaternion; the plane's normal is its z axis
     vel: jax.Array  # (3,) linear velocity (the plane never rotates during a pass)
+    stop_z: jax.Array  # () height where a dropping plane stops
 
     def axes(self) -> jax.Array:
         """(3, 3) rows: the square's two side directions and its unit normal, in world coordinates."""
@@ -112,6 +113,9 @@ class SafeDodge(PipelineEnv, ABC):
             plane_enabled: bool = True,
             plane_slide_speed: float = 0.0,
             plane_slide_distance: float = 1.5,
+            plane_resample_interval: int = 0,
+            plane_drop_speed: float = 0.0,
+            plane_drop_height: float = 2.3,
             plane_offset_range: float = 0.0,
             plane_height_range: Tuple[float, float] = (1.3, 1.3),
             plane_half_size: Optional[float] = None,
@@ -139,6 +143,10 @@ class SafeDodge(PipelineEnv, ABC):
             plane_slide_speed: Horizontal speed of the plane in m/s (0 = still). A sliding plane
                 starts a new pass each time it has gone past.
             plane_slide_distance: Distance from the platform centre where the sliding plane starts.
+            plane_resample_interval: Steps between new planes (0 = one per episode). Not with sliding.
+            plane_drop_speed: Speed (m/s) at which each new plane comes down from plane_drop_height
+                to its sampled height, then stops (0 = it appears there). Not with sliding.
+            plane_drop_height: Height of the plane's centre when it starts dropping.
             plane_offset_range: Max random horizontal offset of the plane from the platform centre.
             plane_height_range: (low, high) random height of the plane's centre.
             plane_half_size: Half the side of the square plane; None covers the platform.
@@ -158,6 +166,13 @@ class SafeDodge(PipelineEnv, ABC):
             raise ValueError('plane_slide_speed and plane_slide_distance must be >= 0.')
         self._plane_slide_speed = plane_slide_speed
         self._plane_slide_distance = plane_slide_distance if plane_slide_speed > 0.0 else 0.0
+        if plane_resample_interval < 0 or plane_drop_speed < 0.0:
+            raise ValueError('plane_resample_interval and plane_drop_speed must be >= 0.')
+        if plane_slide_speed > 0.0 and (plane_resample_interval > 0 or plane_drop_speed > 0.0):
+            raise ValueError('A sliding plane already starts new passes; it cannot also resample or drop.')
+        self._plane_resample_interval = int(plane_resample_interval)
+        self._plane_drop_speed = plane_drop_speed
+        self._plane_drop_height = plane_drop_height
         self._plane_offset_range = plane_offset_range
         if not 0.0 < plane_height_range[0] <= plane_height_range[1]:
             raise ValueError('plane_height_range must be (low, high) with 0 < low <= high.')
@@ -240,10 +255,17 @@ class SafeDodge(PipelineEnv, ABC):
         # Store previous state for velocity calculation
         pipeline_state0 = state.pipeline_state
         plane = pipeline_state0.plane
-        plane = plane.replace(pos=plane.pos + plane.vel * self.dt)
+        pos = plane.pos + plane.vel * self.dt
+        # A dropping plane stops at its height
+        arrived = pos[2] <= plane.stop_z
+        plane = plane.replace(pos=pos.at[2].max(plane.stop_z),
+                              vel=jp.where(arrived, plane.vel.at[2].set(0.0), plane.vel))
         new_info = dict(state.info)
         if self._plane_slide_speed > 0.0:
             plane, new_info["plane_rng"] = self._next_pass(plane, state.info["plane_rng"])
+        if self._plane_resample_interval > 0:
+            plane, new_info["plane_rng"], new_info["plane_timer"] = self._next_plane(
+                plane, state.info["plane_rng"], state.info["plane_timer"])
         pipeline_state = self.pipeline_step(pipeline_state0, action).replace(plane=plane)
 
         # Healthy reward
@@ -319,7 +341,7 @@ class SafeDodge(PipelineEnv, ABC):
                                      'reward_quadctrl')}
         metrics = jax.tree_util.tree_map(
             jp.zeros_like, self._metrics(pipeline_state, pipeline_state, rewards))
-        info = {"cost": metrics["cost"], "plane_rng": rng4}
+        info = {"cost": metrics["cost"], "plane_rng": rng4, "plane_timer": jp.zeros((), jp.int32)}
 
         return State(pipeline_state, obs, reward, done, metrics, info)
 
@@ -330,8 +352,22 @@ class SafeDodge(PipelineEnv, ABC):
         rot = brax_math.quat_mul(brax_math.quat_rot_axis(jp.array([1.0, 0.0, 0.0]), tilt_x),
                                  brax_math.quat_rot_axis(jp.array([0.0, 1.0, 0.0]), tilt_y))
         slide_offset, slide_velocity = self._sample_plane_slide(rng_slide)
-        pos = self._sample_plane_position(rng_pos) + jp.append(slide_offset, 0.0)
-        return Plane(pos=pos, rot=rot, vel=jp.append(slide_velocity, 0.0))
+        position = self._sample_plane_position(rng_pos)
+        pos = position + jp.append(slide_offset, 0.0)
+        vel = jp.append(slide_velocity, 0.0)
+        if self._plane_drop_speed > 0.0:
+            pos = pos.at[2].set(jp.maximum(self._plane_drop_height, position[2]))
+            vel = vel.at[2].set(-self._plane_drop_speed)
+        return Plane(pos=pos, rot=rot, vel=vel, stop_z=position[2])
+
+    def _next_plane(self, plane: Plane, rng: jax.Array, timer: jax.Array) -> Tuple[Plane, jax.Array, jax.Array]:
+        """A new plane every plane_resample_interval steps."""
+        rng, plane_rng = jax.random.split(rng)
+        timer = timer + 1
+        new = timer >= self._plane_resample_interval
+        new_plane = self._sample_plane(plane_rng)
+        plane = jax.tree.map(lambda a, b: jp.where(new, a, b), new_plane, plane)
+        return plane, rng, jp.where(new, 0, timer)
 
     def _next_pass(self, plane: Plane, rng: jax.Array) -> Tuple[Plane, jax.Array]:
         """A new plane once the sliding one has gone past the platform centre."""
