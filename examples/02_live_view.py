@@ -6,13 +6,16 @@ actions. Every second the script checks the files under `crax/` (Python
 sources and XML assets); when one changes, the viewer restarts with the new
 version of the environment, keeping your camera angle.
 
-Two physics modes:
+Three physics modes:
   --physics env     (default) steps the real CRAX env, so reward/cost logic,
                     termination and backend match training. Each restart
                     re-JITs the env (~30-60 s for the humanoid).
   --physics mujoco  steps the env's MuJoCo model with plain CPU MuJoCo. Restarts
                     in a few seconds; best for editing the scene/XML. Reward
                     and cost are not computed.
+  --physics none    no physics simulation; freezes the humanoid and moves
+                    bullets linearly at constant velocity. Fastest startup,
+                    useful for visualizing bullet trajectories.
 
 Usage:
     python examples/02_live_view.py --env_name safe_height_humanoid
@@ -45,8 +48,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--level", type=int, default=1, choices=[1, 2, 3], help="Difficulty level")
     p.add_argument("--env_kwargs", type=str, default="{}",
                    help="JSON dict of extra env constructor kwargs (see docs/PARAMETERS.md)")
-    p.add_argument("--physics", choices=["env", "mujoco"], default="env",
-                   help="Step the real CRAX env (JIT) or plain CPU MuJoCo on its model")
+    p.add_argument("--physics", choices=["env", "mujoco", "none"], default="env",
+                   help="Step the real CRAX env (JIT), plain CPU MuJoCo, or no physics (bullets only)")
     p.add_argument("--actions", choices=["random", "zero"], default="random",
                    help="Action source: uniform random in [-1, 1], or all zeros")
     p.add_argument("--seed", type=int, default=0, help="Random seed")
@@ -251,6 +254,15 @@ def run_viewer(args) -> None:
     n_substeps = max(1, round(dt / model.opt.timestep))
     ctrl_lo, ctrl_hi = model.actuator_ctrlrange[:, 0], model.actuator_ctrlrange[:, 1]
 
+    # For "none" physics mode: freeze humanoid, move bullets linearly
+    if args.physics == "none":
+        # Get initial bullet positions and velocities from the environment
+        all_bullet_pos, all_bullet_vel = env._get_bullet_pos_vel(state.pipeline_state)
+        # Store the initial humanoid pose to freeze it
+        frozen_qpos = np.asarray(state.pipeline_state.q).copy()
+        frozen_qvel = np.asarray(state.pipeline_state.qd).copy()
+        print("[live_view] Physics mode: none (humanoid frozen, bullets move linearly)")
+
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     with mujoco.viewer.launch_passive(model, data) as viewer:
         load_camera(viewer, args._cam_file)
@@ -260,7 +272,48 @@ def run_viewer(args) -> None:
             tick = time.time()
             action = sample_action()
             with viewer.lock():
-                if step_fn is not None:
+                if args.physics == "none":
+                    # No physics mode: freeze humanoid, move bullets linearly
+                    # Freeze humanoid
+                    data.qpos[:] = frozen_qpos
+                    data.qvel[:] = frozen_qvel
+                    
+                    # Move bullets linearly
+                    all_bullet_pos = all_bullet_pos + all_bullet_vel * dt
+                    
+                    # Check which bullets need reset (passed behind humanoid)
+                    # Only check the first self._num_bullets (active bullets)
+                    needs_reset = all_bullet_pos[:env.env._num_bullets, 0] < -1.0  # bullet_reset_x
+                    
+                    # For bullets that need reset, sample new initial conditions
+                    # We use step count as seed for deterministic but varied resets
+                    rng = jax.random.fold_in(jax.random.PRNGKey(0), steps)
+                    rng = jax.random.fold_in(rng, int(np.sum(needs_reset)))
+                    new_positions, new_velocities, new_radii = env._sample_bullet_initial_conditions(rng)
+                    
+                    # Where reset is needed, use new positions/velocities; otherwise keep current
+                    # Only update the active bullets (first self._num_bullets)
+                    all_bullet_pos = all_bullet_pos.at[:env.env._num_bullets].set(
+                        np.where(needs_reset[:, None], new_positions, all_bullet_pos[:env.env._num_bullets])
+                    )
+                    all_bullet_vel = all_bullet_vel.at[:env.env._num_bullets].set(
+                        np.where(needs_reset[:, None], new_velocities, all_bullet_vel[:env.env._num_bullets])
+                    )
+                    
+                    # Update bullet positions in MuJoCo (slide joints)
+                    for i in range(6):
+                        data.qpos[env._bullet_slide_x_q[i]] = all_bullet_pos[i, 0]
+                        data.qpos[env._bullet_slide_y_q[i]] = all_bullet_pos[i, 1]
+                        data.qpos[env._bullet_slide_z_q[i]] = all_bullet_pos[i, 2]
+                        data.qvel[env._bullet_slide_x_qd[i]] = all_bullet_vel[i, 0]
+                        data.qvel[env._bullet_slide_y_qd[i]] = all_bullet_vel[i, 1]
+                        data.qvel[env._bullet_slide_z_qd[i]] = all_bullet_vel[i, 2]
+                    
+                    # Update xpos/xvel in MuJoCo data for rendering
+                    mujoco.mj_forward(model, data)
+                    
+                    done = False
+                elif step_fn is not None:
                     state = step_fn(state, action)
                     ret += float(state.reward)
                     cost += float(state.info.get("cost", 0.0))
