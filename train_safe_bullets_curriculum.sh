@@ -1,4 +1,3 @@
-```bash
 #!/bin/bash
 #SBATCH --job-name=bullets_full
 #SBATCH --nodes=1
@@ -21,4 +20,3 @@ source env/bin/activate
 export MUJOCO_GL=egl
 
 srun bash scripts/bullets_videos.sh
-```
