@@ -1,4 +1,3 @@
-```bash
 #!/usr/bin/env bash
 # SafeBulletsHumanoid curriculum training (levels 1 -> 2 -> 3)
 # Generates videos after training completes.
@@ -26,8 +25,9 @@ ENTROPY_COST=0.01
 LEARNING_RATE=3e-4
 SAFETY_BOUND=0.1
 
-USE_WANDB=true
-WANDB_PROJECT="crax"
+# Disable Weights & Biases
+USE_WANDB=false
+export WANDB_MODE=disabled
 
 MODEL_DIR="models/safe_bullets_$(date +%Y%m%d_%H%M%S)"
 OUT_DIR="runs/experimental_results"
@@ -40,6 +40,7 @@ echo "Algorithm: $ALG"
 echo "Levels: $LEVELS"
 echo "Timesteps: $NUM_TIMESTEPS"
 echo "Model directory: $MODEL_DIR"
+echo "Weights & Biases: disabled"
 echo "=========================================="
 
 # Train the curriculum
@@ -62,7 +63,6 @@ python -m training.train_curriculum \
     --safety_bound "$SAFETY_BOUND" \
     --seed "$SEED" \
     --use_wandb "$USE_WANDB" \
-    --wandb_project "$WANDB_PROJECT" \
     --model_dir "$MODEL_DIR" \
     --out_dir "$OUT_DIR" \
     --store_model true
@@ -81,4 +81,3 @@ python scripts/safe_bullets_policy_videos.py \
 echo "=========================================="
 echo "Training and video generation complete!"
 echo "=========================================="
-```
