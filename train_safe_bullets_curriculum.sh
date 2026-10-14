@@ -19,4 +19,4 @@ source env/bin/activate
 
 export MUJOCO_GL=egl
 
-srun bash scripts/bullets_videos.sh
+srun bash scripts/bullets_video.sh
