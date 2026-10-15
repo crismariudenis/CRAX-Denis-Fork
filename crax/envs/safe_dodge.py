@@ -102,6 +102,8 @@ class SafeDodge(PipelineEnv, ABC):
             ctrl_cost_weight=0.1,
             healthy_reward=5.0,
             height_reward_weight: float = 5.0,
+            height_reward_full_z: Optional[float] = None,
+            height_reward_full_frac: float = 1.0,
             upright_reward_weight: float = 0.0,
             still_cost_weight: float = 1.0,
             terminate_when_unhealthy=True,
@@ -113,6 +115,7 @@ class SafeDodge(PipelineEnv, ABC):
             plane_enabled: bool = True,
             plane_slide_speed: float = 0.0,
             plane_slide_distance: float = 1.5,
+            plane_slide_fraction: float = 0.0,
             plane_resample_interval: int = 0,
             plane_drop_speed: float = 0.0,
             plane_drop_height: float = 2.3,
@@ -131,6 +134,9 @@ class SafeDodge(PipelineEnv, ABC):
             ctrl_cost_weight: Weight for control cost penalty.
             healthy_reward: Reward for staying healthy (alive).
             height_reward_weight: Reward for standing upright, 0 at the fall height.
+            height_reward_full_z: Torso height (m) above which ducking costs little height reward:
+                height_reward_full_frac of it here, all of it at the spawn height. None = spawn height.
+            height_reward_full_frac: Fraction of height_reward_weight earned at height_reward_full_z.
             upright_reward_weight: Reward for keeping the torso vertical.
             still_cost_weight: Penalty per m/s of horizontal centre-of-mass speed.
             terminate_when_unhealthy: Whether to terminate episode when unhealthy.
@@ -140,12 +146,14 @@ class SafeDodge(PipelineEnv, ABC):
             fall_cost: Cost added when the agent falls.
             plane_tilt_range: Max random tilt of the plane per axis, in degrees.
             plane_enabled: False hides the plane and makes its cost 0.
-            plane_slide_speed: Horizontal speed of the plane in m/s (0 = still). A sliding plane
-                starts a new pass each time it has gone past.
+            plane_slide_speed: Horizontal speed of the plane in m/s (0 = still). Without
+                plane_resample_interval every plane slides, and a new pass starts each time it has gone past.
             plane_slide_distance: Distance from the platform centre where the sliding plane starts.
-            plane_resample_interval: Steps between new planes (0 = one per episode). Not with sliding.
+            plane_slide_fraction: With plane_resample_interval: the fraction of new planes that slide
+                through at plane_slide_speed instead of dropping (or appearing).
+            plane_resample_interval: Steps between new planes (0 = one per episode).
             plane_drop_speed: Speed (m/s) at which each new plane comes down from plane_drop_height
-                to its sampled height, then stops (0 = it appears there). Not with sliding.
+                to its sampled height, then stops (0 = it appears there). Not for sliding planes.
             plane_drop_height: Height of the plane's centre when it starts dropping.
             plane_offset_range: Max random horizontal offset of the plane from the platform centre.
             plane_height_range: (low, high) random height of the plane's centre.
@@ -168,8 +176,19 @@ class SafeDodge(PipelineEnv, ABC):
         self._plane_slide_distance = plane_slide_distance if plane_slide_speed > 0.0 else 0.0
         if plane_resample_interval < 0 or plane_drop_speed < 0.0:
             raise ValueError('plane_resample_interval and plane_drop_speed must be >= 0.')
-        if plane_slide_speed > 0.0 and (plane_resample_interval > 0 or plane_drop_speed > 0.0):
-            raise ValueError('A sliding plane already starts new passes; it cannot also resample or drop.')
+        if not 0.0 <= plane_slide_fraction <= 1.0:
+            raise ValueError('plane_slide_fraction must be in [0, 1].')
+        if plane_resample_interval > 0:
+            if (plane_slide_speed > 0.0) != (plane_slide_fraction > 0.0):
+                raise ValueError('With plane_resample_interval, plane_slide_speed and plane_slide_fraction '
+                                 'go together: set both (some planes slide) or neither.')
+        elif plane_slide_speed > 0.0:
+            if plane_drop_speed > 0.0:
+                raise ValueError('Without plane_resample_interval every plane slides; it cannot also drop.')
+            plane_slide_fraction = 1.0  # each pass starts the next one
+        elif plane_slide_fraction > 0.0:
+            raise ValueError('plane_slide_fraction needs plane_resample_interval and plane_slide_speed.')
+        self._plane_slide_fraction = float(plane_slide_fraction)
         self._plane_resample_interval = int(plane_resample_interval)
         self._plane_drop_speed = plane_drop_speed
         self._plane_drop_height = plane_drop_height
@@ -186,6 +205,14 @@ class SafeDodge(PipelineEnv, ABC):
             healthy_z_range = self.default_healthy_z_range
         if healthy_z_range[0] >= self.default_spawn_height:
             raise ValueError('healthy_z_range min must be below the spawn height.')
+        if height_reward_full_z is None:
+            height_reward_full_z = self.default_spawn_height
+        if not healthy_z_range[0] < height_reward_full_z <= self.default_spawn_height:
+            raise ValueError('height_reward_full_z must be above the fall height and at most the spawn height.')
+        if not 0.0 <= height_reward_full_frac <= 1.0:
+            raise ValueError('height_reward_full_frac must be in [0, 1].')
+        self._height_reward_full_z = float(height_reward_full_z)
+        self._height_reward_full_frac = float(height_reward_full_frac)
 
         # Load XML and size the hazard plane and platform
         path = epath.resource_path('crax') / self.agent_xml_path
@@ -261,7 +288,7 @@ class SafeDodge(PipelineEnv, ABC):
         plane = plane.replace(pos=pos.at[2].max(plane.stop_z),
                               vel=jp.where(arrived, plane.vel.at[2].set(0.0), plane.vel))
         new_info = dict(state.info)
-        if self._plane_slide_speed > 0.0:
+        if self._plane_slide_speed > 0.0 and self._plane_resample_interval == 0:
             plane, new_info["plane_rng"] = self._next_pass(plane, state.info["plane_rng"])
         if self._plane_resample_interval > 0:
             plane, new_info["plane_rng"], new_info["plane_timer"] = self._next_plane(
@@ -276,9 +303,13 @@ class SafeDodge(PipelineEnv, ABC):
         else:
             healthy_reward = self._healthy_reward * is_healthy
 
-        # Height reward
-        standing = (pipeline_state.x.pos[0, 2] - min_z) / (self.default_spawn_height - min_z)
-        height_reward = self._height_reward_weight * jp.clip(standing, 0.0, 1.0)
+        # Height reward: steep from the fall height up to full_z, gentle from full_z to the spawn height
+        torso_z = pipeline_state.x.pos[0, 2]
+        full_z, full_frac = self._height_reward_full_z, self._height_reward_full_frac
+        low_part = jp.clip((torso_z - min_z) / (full_z - min_z), 0.0, 1.0)
+        high_part = jp.clip((torso_z - full_z) / max(self.default_spawn_height - full_z, 1e-6), 0.0, 1.0)
+        standing = full_frac * low_part + (1.0 - full_frac) * high_part
+        height_reward = self._height_reward_weight * standing
 
         # Upright reward: how vertical the torso's z axis is
         torso_up = brax_math.rotate(jp.array([0.0, 0.0, 1.0]), pipeline_state.x.rot[0])[2]
@@ -353,11 +384,13 @@ class SafeDodge(PipelineEnv, ABC):
                                  brax_math.quat_rot_axis(jp.array([0.0, 1.0, 0.0]), tilt_y))
         slide_offset, slide_velocity = self._sample_plane_slide(rng_slide)
         position = self._sample_plane_position(rng_pos)
-        pos = position + jp.append(slide_offset, 0.0)
-        vel = jp.append(slide_velocity, 0.0)
+        # fold_in keeps the split above, so planes that always slide or never slide are drawn as before
+        slides = jax.random.uniform(jax.random.fold_in(rng, 1)) < self._plane_slide_fraction
+        pos = position + jp.append(jp.where(slides, slide_offset, 0.0), 0.0)
+        vel = jp.append(jp.where(slides, slide_velocity, 0.0), 0.0)
         if self._plane_drop_speed > 0.0:
-            pos = pos.at[2].set(jp.maximum(self._plane_drop_height, position[2]))
-            vel = vel.at[2].set(-self._plane_drop_speed)
+            pos = pos.at[2].set(jp.where(slides, position[2], jp.maximum(self._plane_drop_height, position[2])))
+            vel = vel.at[2].set(jp.where(slides, 0.0, -self._plane_drop_speed))
         return Plane(pos=pos, rot=rot, vel=vel, stop_z=position[2])
 
     def _next_plane(self, plane: Plane, rng: jax.Array, timer: jax.Array) -> Tuple[Plane, jax.Array, jax.Array]:
