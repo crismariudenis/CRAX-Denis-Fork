@@ -199,15 +199,20 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
         3: {"level": 3},
     },
 
-    # Bullets task - dodge bullets flying at the humanoid
+    # Bullets task - dodge bullets flying at the humanoid.
+    # Spawn y/z are normal around the body (see SafeBullets); the y/z spawn ranges are only
+    # hard clip limits. A smaller std aims more bullets at the body, so it is harder.
     "bullets": {
-        # Level 1: Very slow speed, only 1 bullet at a time
+        # Level 1: Very slow speed, only 1 bullet at a time, widest spread (many near misses)
         1: {
             "num_bullets": 1,
             "bullet_speed_range": [0.75, 1.5],  # Half speed
             "bullet_spawn_x_range": [3.0, 5.0],
-            "bullet_spawn_y_range": [-0.5, 0.5],
-            "bullet_spawn_z_range": [0.5, 1.5],
+            "bullet_spawn_y_range": [-1.0, 1.0],
+            "bullet_spawn_z_range": [0.05, 1.7],
+            "bullet_target_y_std": 0.30,
+            "bullet_target_z_mean": 0.8,
+            "bullet_target_z_std": 0.40,
             "bullet_vel_y_range": [0.0, 0.0],
             "bullet_vel_z_range": [0.0, 0.0],
             "bullet_radius_range": [0.04, 0.06],
@@ -218,18 +223,24 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
             "bullet_speed_range": [1.5, 3.0],
             "bullet_spawn_x_range": [2.5, 5.0],
             "bullet_spawn_y_range": [-1.0, 1.0],
-            "bullet_spawn_z_range": [0.3, 1.8],
+            "bullet_spawn_z_range": [0.05, 1.7],
+            "bullet_target_y_std": 0.22,
+            "bullet_target_z_mean": 0.8,
+            "bullet_target_z_std": 0.35,
             "bullet_vel_y_range": [0.0, 0.0],
             "bullet_vel_z_range": [0.0, 0.0],
             "bullet_radius_range": [0.04, 0.07],
         },
-        # Level 3: All 6 bullets, further increased speed
+        # Level 3: All 6 bullets, further increased speed, tightest aim
         3: {
             "num_bullets": 6,
             "bullet_speed_range": [3.0, 5.0],
             "bullet_spawn_x_range": [2.0, 5.0],
-            "bullet_spawn_y_range": [-1.5, 1.5],
-            "bullet_spawn_z_range": [0.2, 1.8],
+            "bullet_spawn_y_range": [-1.0, 1.0],
+            "bullet_spawn_z_range": [0.05, 1.7],
+            "bullet_target_y_std": 0.18,
+            "bullet_target_z_mean": 0.8,
+            "bullet_target_z_std": 0.30,
             "bullet_vel_y_range": [0.0, 0.0],
             "bullet_vel_z_range": [0.0, 0.0],
             "bullet_radius_range": [0.04, 0.08],

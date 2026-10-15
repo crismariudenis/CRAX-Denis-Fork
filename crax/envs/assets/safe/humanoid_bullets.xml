@@ -130,7 +130,9 @@
         <!-- Bullet bodies (visual only, no collision). They come after the humanoid so
              the torso stays link 0 and its free joint stays first in qpos.
              Each bullet has a slider parent with slide joints (x, y, z) and a child body with the geom.
-             This follows the same pattern as the hazard plane in SafeDodge. Collision cost is computed analytically. -->
+             This follows the same pattern as the hazard plane in SafeDodge. Collision cost is computed analytically.
+             Gravity still acts on these sliders in physics; SafeBullets._update_bullets overrides
+             their position and velocity every step, so they move in straight lines. -->
         <body name="bullet0_slider" pos="0 0 0">
             <joint name="bullet0_slide_x" type="slide" axis="1 0 0" limited="false" armature="0" damping="0"/>
             <joint name="bullet0_slide_y" type="slide" axis="0 1 0" limited="false" armature="0" damping="0"/>
