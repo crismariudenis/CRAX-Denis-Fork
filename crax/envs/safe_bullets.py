@@ -16,7 +16,7 @@
 
 The agent must stay healthy while keeping every body part's hitbox from
 intersecting multiple bullet spheres. Bullets spawn in front of the humanoid
-and travel toward it with constant velocity. The cost is the sum of penetration
+and travel toward it on gravity-affected ballistic trajectories. The cost is the sum of penetration
 depths of body parts into bullet spheres.
 
 No vision - only proprioception + bullet relative positions/velocities.
@@ -161,8 +161,8 @@ class SafeBullets(PipelineEnv, ABC):
             episode_length: Maximum number of steps per episode.
             backend: Physics backend ('generalized', 'spring', 'positional', 'mjx').
         """
-        if num_bullets < 1 or num_bullets > 6:
-            raise ValueError('num_bullets must be between 1 and 6 (limited by XML).')
+        if num_bullets < 0 or num_bullets > 6:
+            raise ValueError('num_bullets must be between 0 and 6 (limited by XML).')
         if bullet_speed_range[0] <= 0 or bullet_speed_range[1] <= 0:
             raise ValueError('bullet_speed_range must be positive (speed magnitude).')
         if bullet_radius_range[0] <= 0 or bullet_radius_range[1] <= 0:
@@ -235,26 +235,86 @@ class SafeBullets(PipelineEnv, ABC):
             if geom_id >= 0:
                 mj_model.geom_rgba[geom_id, 3] = 0.0  # Set alpha to 0 (invisible)
 
-        # Find bullet body/mocap indices from the system
-        self._find_bullet_indices()
-
-        # Agent's own slice of the physics state: everything but ALL bullet bodies
-        # Exclude all 6 bullet bodies to keep observation dimensions consistent across difficulty levels
-        # Hidden bullets still have slide joints controlled by the bullet system (staying at 0)
+        # Build an explicit mapping from MuJoCo body names to Brax link indices.
+        # Never assume body_id - 1 is the index in pipeline_state.x.
         mj_model = self.sys.mj_model
-        bullet_bodies = self._bullet_slider_body_ids  # All 6 bullet bodies
-        self._agent_q = jp.array(np.setdiff1d(np.arange(self.sys.q_size()), mj_model.jnt_qposadr[bullet_bodies]))
-        self._agent_qd = jp.array(np.setdiff1d(np.arange(self.sys.qd_size()), mj_model.jnt_dofadr[bullet_bodies]))
-        self._agent_links = jp.array([i for i in range(self.sys.num_links()) if i + 1 not in bullet_bodies])
+        raw_link_names = getattr(self.sys, 'link_names', None)
+        if raw_link_names is None:
+            raise RuntimeError(
+                'This CRAx/Brax System does not expose link_names. '
+                'Cannot safely map MuJoCo bodies to pipeline link indices; '
+                'inspect the System link-name API before training.'
+            )
+        self._link_names = [
+            name.decode() if isinstance(name, bytes) else str(name)
+            for name in raw_link_names
+        ]
+        self._link_index_by_name = {
+            name: index for index, name in enumerate(self._link_names)
+        }
 
-        # Every body part of the agent (each geom, a sphere, capsule, or box) counts for the bullet cost
-        part_ids = np.array([g for g in range(mj_model.ngeom)
-                             if mj_model.geom_bodyid[g] not in (0, *bullet_bodies)])
+        def body_link_index(body_name):
+            if body_name not in self._link_index_by_name:
+                raise ValueError(
+                    f'Body {body_name!r} not found in Brax link names: '
+                    f'{self._link_names}'
+                )
+            return self._link_index_by_name[body_name]
+
+        self._body_link_index = body_link_index
+        self._torso_link = body_link_index('torso')
+
+        # Resolve bullet joints using JOINT IDs and their qpos/qvel addresses.
+        # Resolve bullet links by name rather than by MuJoCo body ID arithmetic.
+        self._find_bullet_indices()
+        self._bullet_links = jp.array(
+            [body_link_index(f'bullet{i}_slider') for i in range(6)], dtype=jp.int32
+        )
+        self._bullet_links_list = [int(i) for i in self._bullet_links]
+
+        bullet_qpos_addresses = np.concatenate([
+            np.asarray(self._bullet_slide_x_q),
+            np.asarray(self._bullet_slide_y_q),
+            np.asarray(self._bullet_slide_z_q),
+        ]).astype(int)
+        bullet_qd_addresses = np.concatenate([
+            np.asarray(self._bullet_slide_x_qd),
+            np.asarray(self._bullet_slide_y_qd),
+            np.asarray(self._bullet_slide_z_qd),
+        ]).astype(int)
+        self._agent_q = jp.array(np.setdiff1d(
+            np.arange(self.sys.q_size()), bullet_qpos_addresses
+        ))
+        self._agent_qd = jp.array(np.setdiff1d(
+            np.arange(self.sys.qd_size()), bullet_qd_addresses
+        ))
+        bullet_link_set = set(self._bullet_links_list)
+        self._agent_links = jp.array([
+            i for i in range(self.sys.num_links()) if i not in bullet_link_set
+        ], dtype=jp.int32)
+
+        # Every agent geom contributes a hitbox to the analytic bullet cost.
+        bullet_bodies = self._bullet_slider_body_ids
+        part_ids = np.array([
+            g for g in range(mj_model.ngeom)
+            if int(mj_model.geom_bodyid[g]) not in (0, *bullet_bodies)
+        ])
         part_types = mj_model.geom_type[part_ids]
-        sphere, capsule, box = int(mujoco.mjtGeom.mjGEOM_SPHERE), int(mujoco.mjtGeom.mjGEOM_CAPSULE), int(mujoco.mjtGeom.mjGEOM_BOX)
+        sphere = int(mujoco.mjtGeom.mjGEOM_SPHERE)
+        capsule = int(mujoco.mjtGeom.mjGEOM_CAPSULE)
+        box = int(mujoco.mjtGeom.mjGEOM_BOX)
         if not np.all((part_types == sphere) | (part_types == capsule) | (part_types == box)):
             raise ValueError('SafeBullets agents may only use sphere, capsule, and box geoms.')
-        self._part_link = jp.array(mj_model.geom_bodyid[part_ids] - 1)
+
+        part_body_names = [
+            mujoco.mj_id2name(
+                mj_model, mujoco.mjtObj.mjOBJ_BODY, int(mj_model.geom_bodyid[g])
+            )
+            for g in part_ids
+        ]
+        self._part_link = jp.array([
+            body_link_index(name) for name in part_body_names
+        ], dtype=jp.int32)
         self._part_pos = jp.array(mj_model.geom_pos[part_ids])
         # A capsule's axis is its geom's local z; a sphere/box gets half-length 0
         self._part_axis = jax.vmap(brax_math.rotate, in_axes=(None, 0))(
@@ -264,85 +324,103 @@ class SafeBullets(PipelineEnv, ABC):
             np.where(part_types == capsule, mj_model.geom_size[part_ids, 1], 0.0))
 
     def _find_bullet_indices(self):
-        """Find bullet body/joint IDs from the MuJoCo model.
-
-        The bullet geoms are attached to the slider bodies (bullet{i}_slider)
-        because the child bodies without joints get welded to their parent.
-        So the slider bodies ARE the bullet bodies for rendering and collision.
-        
-        Always finds all 6 bullet bodies regardless of self._num_bullets to keep
-        observation dimensions consistent across difficulty levels.
-        """
+        """Find all bullet slider body IDs and slide-joint qpos/qvel addresses."""
         mj_model = self.sys.mj_model
-        body_id = lambda name: mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, name)
-        joint_id = lambda name: mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_JOINT, name)
-        
-        # Bullet slider bodies (parents with slide joints) - these ARE the bullet bodies
-        # because the child bodies get welded to them and their geoms are attached here
-        # Always find all 6 bullet bodies to keep observation dimensions consistent
-        self._bullet_slider_body_ids = [body_id(f'bullet{i}_slider') for i in range(6)]
-        self._bullet_body_ids = self._bullet_slider_body_ids  # Same bodies
-        
-        # Bullet slide joints (x, y, z) - these are the qpos/qvel addresses for bullet positions
-        # Always get all 6 bullet joints
-        self._bullet_slide_x_q = jp.array([mj_model.jnt_qposadr[joint_id(f'bullet{i}_slide_x')] for i in range(6)])
-        self._bullet_slide_y_q = jp.array([mj_model.jnt_qposadr[joint_id(f'bullet{i}_slide_y')] for i in range(6)])
-        self._bullet_slide_z_q = jp.array([mj_model.jnt_qposadr[joint_id(f'bullet{i}_slide_z')] for i in range(6)])
-        self._bullet_slide_x_qd = jp.array([mj_model.jnt_dofadr[joint_id(f'bullet{i}_slide_x')] for i in range(6)])
-        self._bullet_slide_y_qd = jp.array([mj_model.jnt_dofadr[joint_id(f'bullet{i}_slide_y')] for i in range(6)])
-        self._bullet_slide_z_qd = jp.array([mj_model.jnt_dofadr[joint_id(f'bullet{i}_slide_z')] for i in range(6)])
-        
-        # Bullet links in Brax (link i = MuJoCo body i + 1, so MuJoCo body b = Brax link b-1)
-        self._bullet_links = jp.array([bid - 1 for bid in self._bullet_body_ids])
-        # Ensure it's a 1D array for proper indexing
-        self._bullet_links = jp.reshape(self._bullet_links, (-1,))
-        # Also store as Python list for indexing
-        self._bullet_links_list = [int(link) for link in self._bullet_links]
+
+        def body_id(name):
+            result = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, name)
+            if result < 0:
+                raise ValueError(f'Missing MuJoCo body: {name}')
+            return result
+
+        def joint_id(name):
+            result = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            if result < 0:
+                raise ValueError(f'Missing MuJoCo joint: {name}')
+            return result
+
+        self._bullet_slider_body_ids = [
+            body_id(f'bullet{i}_slider') for i in range(6)
+        ]
+        self._bullet_body_ids = self._bullet_slider_body_ids
+
+        self._bullet_slide_x_q = jp.array([
+            mj_model.jnt_qposadr[joint_id(f'bullet{i}_slide_x')] for i in range(6)
+        ])
+        self._bullet_slide_y_q = jp.array([
+            mj_model.jnt_qposadr[joint_id(f'bullet{i}_slide_y')] for i in range(6)
+        ])
+        self._bullet_slide_z_q = jp.array([
+            mj_model.jnt_qposadr[joint_id(f'bullet{i}_slide_z')] for i in range(6)
+        ])
+        self._bullet_slide_x_qd = jp.array([
+            mj_model.jnt_dofadr[joint_id(f'bullet{i}_slide_x')] for i in range(6)
+        ])
+        self._bullet_slide_y_qd = jp.array([
+            mj_model.jnt_dofadr[joint_id(f'bullet{i}_slide_y')] for i in range(6)
+        ])
+        self._bullet_slide_z_qd = jp.array([
+            mj_model.jnt_dofadr[joint_id(f'bullet{i}_slide_z')] for i in range(6)
+        ])
 
     def _sample_bullet_initial_conditions(
-            self, rng: jax.Array, target_yz=None) -> Tuple[jax.Array, jax.Array, jax.Array]:
-        """Sample random spawn position, velocity, and radius for each bullet.
+            self, rng: jax.Array, target_yz=None
+    ) -> Tuple[jax.Array, jax.Array, jax.Array]:
+        """Sample bullet spawn positions and ballistic launch velocities.
 
-        x is uniform in bullet_spawn_x_range. y and z are normal around the body
-        (target_yz = (y, z) of the body centre, default (0, bullet_target_z_mean)),
-        clipped to the spawn ranges, so most bullets are aimed at the humanoid.
-
-        Returns:
-            positions: (num_bullets, 3) array of spawn positions
-            velocities: (num_bullets, 3) array of velocities
-            radii: (num_bullets,) array of radii
+        Bullets are aimed toward x=0 at a sampled target height. Their z velocity
+        compensates for gravity so the nominal trajectory passes through target_z.
+        Small y/z velocity noise keeps trajectories varied.
         """
-        rng_pos_x, rng_pos_y, rng_pos_z, rng_vel_x, rng_vel_y, rng_vel_z, rng_rad = jax.random.split(rng, 7)
+        (rng_pos_x, rng_pos_y, rng_pos_z, rng_speed,
+         rng_vel_y, rng_vel_z, rng_rad) = jax.random.split(rng, 7)
 
-        # Spawn positions: x in front, y/z spread around humanoid
-        pos_x = jax.random.uniform(rng_pos_x, (self._num_bullets,),
-                                   minval=self._bullet_spawn_x_range[0],
-                                   maxval=self._bullet_spawn_x_range[1])
-        target_y, target_z = (0.0, self._bullet_target_z_mean) if target_yz is None else target_yz
-        pos_y = target_y + self._bullet_target_y_std * jax.random.normal(rng_pos_y, (self._num_bullets,))
-        pos_z = target_z + self._bullet_target_z_std * jax.random.normal(rng_pos_z, (self._num_bullets,))
-        pos_y = jp.clip(pos_y, self._bullet_spawn_y_range[0], self._bullet_spawn_y_range[1])
-        pos_z = jp.clip(pos_z, self._bullet_spawn_z_range[0], self._bullet_spawn_z_range[1])
+        pos_x = jax.random.uniform(
+            rng_pos_x, (self._num_bullets,),
+            minval=self._bullet_spawn_x_range[0],
+            maxval=self._bullet_spawn_x_range[1],
+        )
+        target_y, target_z = (
+            (0.0, self._bullet_target_z_mean) if target_yz is None else target_yz
+        )
+        target_y = jp.clip(target_y, -0.6, 0.6)
+        target_z = jp.clip(target_z, 0.25, 1.8)
+
+        pos_y = target_y + self._bullet_target_y_std * jax.random.normal(
+            rng_pos_y, (self._num_bullets,)
+        )
+        pos_z = target_z + self._bullet_target_z_std * jax.random.normal(
+            rng_pos_z, (self._num_bullets,)
+        )
+        pos_y = jp.clip(pos_y, *self._bullet_spawn_y_range)
+        pos_z = jp.clip(pos_z, *self._bullet_spawn_z_range)
         positions = jp.stack([pos_x, pos_y, pos_z], axis=1)
 
-        # Velocities: negative x (toward humanoid) + random y/z
-        speed = jax.random.uniform(rng_vel_x, (self._num_bullets,),
-                                   minval=self._bullet_speed_range[0],
-                                   maxval=self._bullet_speed_range[1])
-        vel_x = -speed  # Negative x = toward humanoid (which faces +x)
-        vel_y = jax.random.uniform(rng_vel_y, (self._num_bullets,),
-                                   minval=self._bullet_vel_y_range[0],
-                                   maxval=self._bullet_vel_y_range[1])
-        vel_z = jax.random.uniform(rng_vel_z, (self._num_bullets,),
-                                   minval=self._bullet_vel_z_range[0],
-                                   maxval=self._bullet_vel_z_range[1])
+        # Randomized horizontal speed; bullets travel toward negative x.
+        speed = jp.clip(
+            4.5 + 0.6 * jax.random.normal(rng_speed, (self._num_bullets,)),
+            self._bullet_speed_range[0], self._bullet_speed_range[1],
+        )
+        vel_x = -speed
+        flight_time = pos_x / speed
+        vel_y_nominal = (target_y - pos_y) / jp.maximum(flight_time, 1e-6)
+        gravity = 9.81
+        vel_z_nominal = (
+            target_z - pos_z + 0.5 * gravity * jp.square(flight_time)
+        ) / jp.maximum(flight_time, 1e-6)
+        vel_y = vel_y_nominal + 0.15 * jax.random.normal(
+            rng_vel_y, (self._num_bullets,)
+        )
+        vel_z = vel_z_nominal + 0.15 * jax.random.normal(
+            rng_vel_z, (self._num_bullets,)
+        )
         velocities = jp.stack([vel_x, vel_y, vel_z], axis=1)
 
-        # Radii
-        radii = jax.random.uniform(rng_rad, (self._num_bullets,),
-                                   minval=self._bullet_radius_range[0],
-                                   maxval=self._bullet_radius_range[1])
-
+        radii = jax.random.uniform(
+            rng_rad, (self._num_bullets,),
+            minval=self._bullet_radius_range[0],
+            maxval=self._bullet_radius_range[1],
+        )
         return positions, velocities, radii
 
     def _set_bullet_qpos_qvel(self, qpos: jax.Array, qvel: jax.Array, positions: jax.Array, velocities: jax.Array) -> Tuple[jax.Array, jax.Array]:
@@ -358,69 +436,58 @@ class SafeBullets(PipelineEnv, ABC):
 
     def _update_bullets(self, pipeline_state0: base.State, pipeline_state: base.State,
                         step_count: jax.Array) -> base.State:
-        """Move bullets at constant velocity, reset when past humanoid.
+        """Keep physics-integrated bullet motion and respawn bullets behind the agent.
 
-        Position and velocity are taken from the state BEFORE the physics step
-        (pipeline_state0), so gravity and the physics integration of the free
-        slider joints are discarded. Bullets are purely kinematic.
-
-        Args:
-            pipeline_state0: Physics state before the step (source of bullet pos/vel)
-            pipeline_state: Physics state after the step (bullet entries get overwritten)
-            step_count: Current step number (for time-based updates)
-
-        Returns:
-            Updated pipeline state with new bullet positions
+        The pipeline has already advanced the slider joints, including gravity.
+        Preserve that integrated state for active bullets; only reset bullets that
+        have crossed the reset plane. The reset values are written to q/qd and the
+        corresponding Brax link transforms so observations and costs agree.
         """
-        dt = self.dt
-        all_bullet_pos, all_bullet_vel = self._get_bullet_pos_vel(pipeline_state0)
-        bullet_pos = all_bullet_pos[:self._num_bullets]
-        bullet_vel = all_bullet_vel[:self._num_bullets]
+        if self._num_bullets == 0:
+            return pipeline_state
 
-        # Update positions: constant velocity
-        new_pos = bullet_pos + bullet_vel * dt
+        all_pos, all_vel = self._get_bullet_pos_vel(pipeline_state)
+        active_pos = all_pos[:self._num_bullets]
+        active_vel = all_vel[:self._num_bullets]
+        needs_reset = active_pos[:, 0] < self._bullet_reset_x
 
-        # Check which bullets need reset (passed behind humanoid)
-        needs_reset = new_pos[:, 0] < self._bullet_reset_x
-
-        # For bullets that need reset, sample new initial conditions
-        # We use step_count as a seed for deterministic but varied resets
         rng = jax.random.fold_in(jax.random.PRNGKey(0), step_count)
-        rng = jax.random.fold_in(rng, jp.sum(new_pos[:, 0] < self._bullet_reset_x).astype(jp.int32))
+        rng = jax.random.fold_in(
+            rng, jp.sum(needs_reset).astype(jp.int32)
+        )
         target = None
         if self._bullet_aim_at_agent:
-            target = (pipeline_state0.x.pos[0, 1], self._bullet_target_z_mean)
-        new_positions, new_velocities, new_radii = self._sample_bullet_initial_conditions(rng, target)
+            target = (
+                pipeline_state.x.pos[self._torso_link, 1],
+                self._bullet_target_z_mean,
+            )
+        reset_pos, reset_vel, _ = self._sample_bullet_initial_conditions(rng, target)
 
-        # Where reset is needed, use new positions/velocities; otherwise keep current
-        new_pos = jp.where(needs_reset[:, None], new_positions, new_pos)
-        new_vel = jp.where(needs_reset[:, None], new_velocities, bullet_vel)
+        new_pos = jp.where(needs_reset[:, None], reset_pos, active_pos)
+        new_vel = jp.where(needs_reset[:, None], reset_vel, active_vel)
 
-        # Create full 6-bullet arrays for updating pipeline state
-        # Only the first self._num_bullets are updated; the rest stay at their current positions
-        full_new_pos = all_bullet_pos.at[:self._num_bullets].set(new_pos)
-        full_new_vel = all_bullet_vel.at[:self._num_bullets].set(new_vel)
-
-        # Update the pipeline state
-        # Bullet positions are in qpos at slide joint addresses
+        # Update only active bullets; hidden bullet slots remain untouched.
         qpos = pipeline_state.q
         qvel = pipeline_state.qd
+        x_pos = pipeline_state.x.pos
+        x_vel = pipeline_state.xd.vel
+        for i in range(self._num_bullets):
+            qpos = qpos.at[self._bullet_slide_x_q[i]].set(new_pos[i, 0])
+            qpos = qpos.at[self._bullet_slide_y_q[i]].set(new_pos[i, 1])
+            qpos = qpos.at[self._bullet_slide_z_q[i]].set(new_pos[i, 2])
+            qvel = qvel.at[self._bullet_slide_x_qd[i]].set(new_vel[i, 0])
+            qvel = qvel.at[self._bullet_slide_y_qd[i]].set(new_vel[i, 1])
+            qvel = qvel.at[self._bullet_slide_z_qd[i]].set(new_vel[i, 2])
+            link = self._bullet_links_list[i]
+            x_pos = x_pos.at[link].set(new_pos[i])
+            x_vel = x_vel.at[link].set(new_vel[i])
 
-        for i in range(6):
-            qpos = qpos.at[self._bullet_slide_x_q[i]].set(full_new_pos[i, 0])
-            qpos = qpos.at[self._bullet_slide_y_q[i]].set(full_new_pos[i, 1])
-            qpos = qpos.at[self._bullet_slide_z_q[i]].set(full_new_pos[i, 2])
-            qvel = qvel.at[self._bullet_slide_x_qd[i]].set(full_new_vel[i, 0])
-            qvel = qvel.at[self._bullet_slide_y_qd[i]].set(full_new_vel[i, 1])
-            qvel = qvel.at[self._bullet_slide_z_qd[i]].set(full_new_vel[i, 2])
-
-        # Also update xpos/xvel in the pipeline state
-        bullet_links_array = jp.array(self._bullet_links_list, dtype=jp.int32)
-        x_pos = pipeline_state.x.pos.at[jp.array(self._bullet_links_list, dtype=jp.int32)].set(full_new_pos)
-        x_vel = pipeline_state.xd.vel.at[jp.array(self._bullet_links_list, dtype=jp.int32)].set(full_new_vel)
-
-        return pipeline_state.replace(q=qpos, qd=qvel, x=pipeline_state.x.replace(pos=x_pos),
-                                       xd=pipeline_state.xd.replace(vel=x_vel))
+        return pipeline_state.replace(
+            q=qpos,
+            qd=qvel,
+            x=pipeline_state.x.replace(pos=x_pos),
+            xd=pipeline_state.xd.replace(vel=x_vel),
+        )
 
     def _bullet_overlaps(self, pipeline_state: base.State) -> jax.Array:
         """Compute penetration depth of each body part into each bullet sphere.
@@ -429,6 +496,10 @@ class SafeBullets(PipelineEnv, ABC):
             (num_parts, num_bullets) array where > 0 means penetration depth,
             <= 0 means gap (negative = distance to surface).
         """
+        # No-bullet baseline: preserve a valid empty (num_parts, 0) matrix.
+        if self._num_bullets == 0:
+            return jp.zeros((self._part_link.shape[0], 0), dtype=jp.float32)
+
         # Bullet positions and radii - use helper method for proper JAX indexing
         all_bullet_pos, _ = self._get_bullet_pos_vel(pipeline_state)
         bullet_pos = all_bullet_pos[:self._num_bullets]
@@ -478,8 +549,8 @@ class SafeBullets(PipelineEnv, ABC):
         Returns:
             (num_bullets * 6,) array: [rel_pos_x, rel_pos_y, rel_pos_z, rel_vel_x, rel_vel_y, rel_vel_z] per bullet
         """
-        torso_pos = pipeline_state.x.pos[0]  # Torso is link 0
-        torso_vel = pipeline_state.xd.vel[0]
+        torso_pos = pipeline_state.x.pos[self._torso_link]
+        torso_vel = pipeline_state.xd.vel[self._torso_link]
 
         # Use helper method for proper JAX indexing
         all_bullet_pos, all_bullet_vel = self._get_bullet_pos_vel(pipeline_state)
@@ -497,7 +568,7 @@ class SafeBullets(PipelineEnv, ABC):
         [torso x, y relative to the platform centre (2), platform radius (1),
         distance from the torso to the edge (1)].
         """
-        torso_xy = pipeline_state.x.pos[0, :2]
+        torso_xy = pipeline_state.x.pos[self._torso_link, :2]
         edge_distance = self._platform_radius - jp.linalg.norm(torso_xy)
         return jp.concatenate([torso_xy, jp.array([self._platform_radius, edge_distance])])
 
@@ -514,7 +585,8 @@ class SafeBullets(PipelineEnv, ABC):
         fall_cost = self._fall_cost * (1.0 - self._is_healthy(pipeline_state))
 
         # Deepest overlap of any part with any bullet; negative = gap
-        max_penetration = jp.max(penetrations)
+        max_penetration = (jp.max(penetrations) if self._num_bullets > 0
+                           else jp.array(0.0, dtype=jp.float32))
         num_touching = jp.sum(penetrations > 0.0).astype(jp.float32)
 
         return {
@@ -529,14 +601,14 @@ class SafeBullets(PipelineEnv, ABC):
     def _is_healthy(self, pipeline_state: base.State) -> jax.Array:
         """1.0 while standing, 0.0 once fallen: torso out of healthy_z_range or off the platform."""
         min_z, max_z = self._healthy_z_range
-        torso_z = pipeline_state.x.pos[0, 2]
+        torso_z = pipeline_state.x.pos[self._torso_link, 2]
         is_healthy = jp.where((torso_z < min_z) | (torso_z > max_z), 0.0, 1.0)
         # Torso off the edge of the round platform counts as a fall
-        torso_radius = jp.linalg.norm(pipeline_state.x.pos[0, :2])
+        torso_radius = jp.linalg.norm(pipeline_state.x.pos[self._torso_link, :2])
         return jp.where(torso_radius > self._platform_radius, 0.0, is_healthy)
 
     # Metrics that are also copied into state.info each step.
-    _INFO_KEYS = ('cost', 'bullet_distance', 'bullet_violation', 'fall_cost')
+    _INFO_KEYS = ('cost', 'bullet_distance', 'bullet_violation', 'bullet_parts_touching', 'bullet_cost', 'fall_cost')
 
     def _metrics(
             self, pipeline_state0: base.State, pipeline_state: base.State,
@@ -691,7 +763,7 @@ class SafeBullets(PipelineEnv, ABC):
 
         # Height reward, pulls against ducking: 0 at the fall height,
         # full weight when the torso is as high as at spawn (standing upright)
-        standing = (pipeline_state.x.pos[0, 2] - min_z) / (self.default_spawn_height - min_z)
+        standing = (pipeline_state.x.pos[self._torso_link, 2] - min_z) / (self.default_spawn_height - min_z)
         height_reward = self._height_reward_weight * jp.clip(standing, 0.0, 1.0)
 
         # Control cost

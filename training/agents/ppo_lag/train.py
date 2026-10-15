@@ -73,6 +73,8 @@ def train(
         # transfer learning / curriculum support
         pretrained_params: Optional[Any] = None,
         init_cost_value_from: str = 'value',
+        pretrained_state: Optional[TrainingState] = None,
+        return_training_state: bool = False,
 ):
     """PPO-Lagrange training.
 
@@ -128,6 +130,8 @@ def train(
         from an algorithm without cost_value (e.g., PPO). Options:
         - 'value': copy from value network (often works well for transfer)
         - 'random': use random initialization
+      pretrained_state: complete prior TrainingState for curriculum warm-starting.
+      return_training_state: append the final TrainingState for curriculum transfer.
 
     Returns:
       Tuple of (make_policy function, network params, metrics, eval_env)
@@ -216,6 +220,8 @@ def train(
         restore_checkpoint_path=restore_checkpoint_path,
         restore_params=effective_restore_params,
         restore_value_fn=restore_value_fn,
+        restore_training_state=pretrained_state,
+        return_training_state=return_training_state,
         # Constrained RL hooks
         loss_fn=lagrange_loss_fn,
         post_step_fn=post_step_fn,

@@ -244,6 +244,8 @@ def train(
         restore_checkpoint_path: Optional[str] = None,
         restore_params: Optional[Any] = None,
         restore_value_fn: bool = True,
+        restore_training_state: Optional[TrainingState] = None,
+        return_training_state: bool = False,
         # customization hooks for constrained RL variants
         loss_fn: Optional[Callable] = None,
         post_step_fn: Optional[PostStepFn] = None,
@@ -320,6 +322,11 @@ def train(
         from the return values of ppo.train().
       restore_value_fn: whether to restore the value function from the checkpoint
         or use a random initialization
+      restore_training_state: optional prior learner state for curriculum transfer.
+        Network parameters, compatible normalizer statistics, and aux_state are
+        restored; optimizer state and environment step count are intentionally reset.
+      return_training_state: if True, append the final unreplicated TrainingState to
+        the returned tuple. Inference params/checkpoints retain their existing format.
       loss_fn: Optional custom loss function. If None, uses compute_ppo_loss.
         For constrained RL variants, pass compute_ppo_lagrange_loss.
       post_step_fn: Optional function called after each training step.
@@ -813,12 +820,56 @@ def train(
             ),
         )
 
-    if num_timesteps == 0:
-        return (
-            make_policy,
-            _policy_params_tuple(training_state),
-            {},
+    if restore_training_state is not None:
+        """Warm-start learner-only state without changing inference checkpoint format."""
+        previous = restore_training_state
+        previous_params = previous.params
+        # Curriculum stages are expected to share network architecture. Fail clearly
+        # instead of silently carrying incompatible parameter trees across stages.
+        for name in ('policy', 'value', 'cost_value', 'encoder'):
+            old_value = getattr(previous_params, name, None)
+            new_value = getattr(training_state.params, name, None)
+            if old_value is None or new_value is None:
+                if old_value is not new_value:
+                    raise ValueError(
+                        f'Cannot transfer curriculum state: {name} network differs '
+                        'between stages.'
+                    )
+                continue
+            old_shapes = jax.tree_util.tree_map(lambda x: getattr(x, 'shape', None), old_value)
+            new_shapes = jax.tree_util.tree_map(lambda x: getattr(x, 'shape', None), new_value)
+            if jax.tree_util.tree_structure(old_shapes) != jax.tree_util.tree_structure(new_shapes) or old_shapes != new_shapes:
+                raise ValueError(
+                    f'Cannot transfer curriculum state: {name} parameter shapes differ '
+                    'between stages.'
+                )
+
+        normalizer_to_use = training_state.normalizer_params
+        if _check_normalizer_shape_compatible(
+            previous.normalizer_params, training_state.normalizer_params
+        ):
+            normalizer_to_use = previous.normalizer_params
+        else:
+            logging.warning(
+                'Curriculum normalizer shape differs between stages; using a fresh '
+                'normalizer for this stage.'
+            )
+        aux_state_to_use = (
+            previous.aux_state
+            if previous.aux_state is not None and training_state.aux_state is not None
+            else training_state.aux_state
         )
+        training_state = training_state.replace(
+            params=previous_params,
+            normalizer_params=normalizer_to_use,
+            aux_state=aux_state_to_use,
+        )
+
+    if num_timesteps == 0:
+        result = (make_policy, _policy_params_tuple(training_state), {}, eval_env)
+        if return_training_state:
+            result += (training_state,)
+        return result
 
     _dbg("Replicating training state to devices...")
     # Add a leading device dimension for vmap/pmap.
@@ -943,4 +994,7 @@ def train(
 
     logging.info('total steps: %s', total_steps)
     pmap.synchronize_hosts()
-    return (make_policy, params, metrics, eval_env)
+    result = (make_policy, params, metrics, eval_env)
+    if return_training_state:
+        result += (_unpmap(training_state),)
+    return result

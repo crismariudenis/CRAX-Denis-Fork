@@ -207,7 +207,7 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
         1: {
             "num_bullets": 1,
             "bullet_speed_range": [0.75, 1.5],  # Half speed
-            "bullet_spawn_x_range": [3.0, 5.0],
+            "bullet_spawn_x_range": [1.5, 2.5],  # same near spawn for all levels
             "bullet_spawn_y_range": [-1.0, 1.0],
             "bullet_spawn_z_range": [0.05, 1.7],
             "bullet_target_y_std": 0.30,
@@ -221,7 +221,7 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
         2: {
             "num_bullets": 3,
             "bullet_speed_range": [1.5, 3.0],
-            "bullet_spawn_x_range": [2.5, 5.0],
+            "bullet_spawn_x_range": [1.5, 2.5],  # same near spawn for all levels
             "bullet_spawn_y_range": [-1.0, 1.0],
             "bullet_spawn_z_range": [0.05, 1.7],
             "bullet_target_y_std": 0.22,
@@ -235,7 +235,7 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
         3: {
             "num_bullets": 6,
             "bullet_speed_range": [3.0, 5.0],
-            "bullet_spawn_x_range": [2.0, 5.0],
+            "bullet_spawn_x_range": [1.5, 2.5],  # same near spawn for all levels
             "bullet_spawn_y_range": [-1.0, 1.0],
             "bullet_spawn_z_range": [0.05, 1.7],
             "bullet_target_y_std": 0.18,

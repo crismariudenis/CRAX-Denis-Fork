@@ -61,11 +61,11 @@ python -m training.train_curriculum \
     --entropy_cost "$ENTROPY_COST" \
     --learning_rate "$LEARNING_RATE" \
     --safety_bound "$SAFETY_BOUND" \
-    --seed "$SEED" \
+    --seeds "$SEED" \
     --use_wandb "$USE_WANDB" \
     --model_dir "$MODEL_DIR" \
     --out_dir "$OUT_DIR" \
-    --store_model true
+    --store_model
 
 echo "=========================================="
 echo "Generating SafeBulletsHumanoid videos..."
