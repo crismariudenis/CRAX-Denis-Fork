@@ -145,25 +145,29 @@ def save(
 def load(
         path: Union[str, epath.Path],
 ):
-    """Loads checkpoint."""
-    # Ensure absolute path (orbax requires absolute paths)
+    """Loads checkpoint, restoring arrays as NumPy arrays."""
+    # Ensure absolute path (orbax requires absolute paths).
     path = epath.Path(path)
     if not path.is_absolute():
         from pathlib import Path as StdPath
         path = epath.Path(StdPath(path).resolve())
+
     if not path.exists():
-        raise ValueError(f'checkpoint path does not exist: {path.as_posix()}')
+        raise ValueError(
+            f'checkpoint path does not exist: {path.as_posix()}'
+        )
 
     logging.info('restoring from checkpoint %s', path.as_posix())
 
-    metadata = ocp.PyTreeCheckpointer().metadata(path)
-    restore_args = jax.tree.map(lambda _: ocp.RestoreArgs(restore_type=np.ndarray), metadata)
     orbax_checkpointer = ocp.PyTreeCheckpointer()
-    try:
-        target = orbax_checkpointer.restore(path, ocp.args.PyTreeRestore(restore_args=restore_args), item=None)
-    except ValueError:
-        # Fallback without restore args.
-        target = orbax_checkpointer.restore(path, item=None)
+
+    # Restore as NumPy arrays instead of using the saved JAX device
+    # sharding (which may reference an unavailable device such as cuda:0).
+    target = orbax_checkpointer.restore(
+        path,
+        args=ocp.args.PyTreeRestore(restore_type=np.ndarray),
+    )
+
     target[0] = running_statistics.RunningStatisticsState(**target[0])
 
     return target
