@@ -145,9 +145,9 @@ def save(
 def load(
         path: Union[str, epath.Path],
 ):
-    """Loads checkpoint, restoring arrays as NumPy arrays."""
-    # Ensure absolute path (orbax requires absolute paths).
+    """Loads checkpoint onto the current CPU device."""
     path = epath.Path(path)
+
     if not path.is_absolute():
         from pathlib import Path as StdPath
         path = epath.Path(StdPath(path).resolve())
@@ -159,16 +159,34 @@ def load(
 
     logging.info('restoring from checkpoint %s', path.as_posix())
 
-    orbax_checkpointer = ocp.PyTreeCheckpointer()
-
-    # Restore as NumPy arrays instead of using the saved JAX device
-    # sharding (which may reference an unavailable device such as cuda:0).
-    target = orbax_checkpointer.restore(
-        path,
-        args=ocp.args.PyTreeRestore(restore_type=np.ndarray),
+    # Use CPU sharding instead of the saved cuda:0 sharding.
+    cpu_sharding = jax.sharding.SingleDeviceSharding(
+        jax.devices("cpu")[0]
     )
 
-    target[0] = running_statistics.RunningStatisticsState(**target[0])
+    # Read the saved PyTree structure, not StepMetadata.
+    handler = ocp.PyTreeCheckpointHandler()
+    metadata = handler.metadata(path)
+
+    restore_args = jax.tree_util.tree_map(
+        lambda _: ocp.ArrayRestoreArgs(
+            restore_type=jax.Array,
+            sharding=cpu_sharding,
+        ),
+        metadata,
+    )
+
+    checkpointer = ocp.PyTreeCheckpointer()
+    target = checkpointer.restore(
+        path,
+        args=ocp.args.PyTreeRestore(
+            restore_args=restore_args
+        ),
+    )
+
+    target[0] = running_statistics.RunningStatisticsState(
+        **target[0]
+    )
 
     return target
 
