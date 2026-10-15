@@ -1,4 +1,3 @@
-
 #!/bin/bash
 #SBATCH --job-name=safe_bullets_video
 #SBATCH --nodes=1
