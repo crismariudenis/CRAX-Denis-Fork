@@ -21,6 +21,7 @@ platform at a constant speed.
 """
 
 import dataclasses
+import math
 from abc import ABC, abstractmethod
 from typing import List, Optional, Sequence, Tuple, Union
 from xml.etree import ElementTree
@@ -105,9 +106,11 @@ class SafeDodge(PipelineEnv, ABC):
             height_reward_full_z: Optional[float] = None,
             height_reward_full_frac: float = 1.0,
             upright_reward_weight: float = 0.0,
+            upright_free_distance: float = 0.0,
             still_cost_weight: float = 1.0,
             terminate_when_unhealthy=True,
             healthy_z_range: Optional[Tuple[float, float]] = None,
+            fall_on_floor_contact: bool = False,
             reset_noise_scale=1e-2,
             plane_cost_weight: float = 1.25,
             fall_cost: float = 25.0,
@@ -116,6 +119,8 @@ class SafeDodge(PipelineEnv, ABC):
             plane_slide_speed: float = 0.0,
             plane_slide_distance: float = 1.5,
             plane_slide_fraction: float = 0.0,
+            plane_slide_heading: float = 180.0,
+            plane_slide_heading_range: float = 180.0,
             plane_resample_interval: int = 0,
             plane_drop_speed: float = 0.0,
             plane_drop_height: float = 2.3,
@@ -138,9 +143,13 @@ class SafeDodge(PipelineEnv, ABC):
                 height_reward_full_frac of it here, all of it at the spawn height. None = spawn height.
             height_reward_full_frac: Fraction of height_reward_weight earned at height_reward_full_z.
             upright_reward_weight: Reward for keeping the torso vertical.
+            upright_free_distance: While the plane is within this distance (m) of the torso, the upright
+                reward is paid in full whatever the torso's tilt, so leaning to dodge loses no upright
+                reward. The height reward still applies, so it must stand back up. 0 = never.
             still_cost_weight: Penalty per m/s of horizontal centre-of-mass speed.
             terminate_when_unhealthy: Whether to terminate episode when unhealthy.
             healthy_z_range: (min, max) z-range for healthy state.
+            fall_on_floor_contact: Also a fall: any body part other than the feet resting on the floor.
             reset_noise_scale: Scale of noise added to initial state.
             plane_cost_weight: Cost per metre of hitbox overlap with the plane.
             fall_cost: Cost added when the agent falls.
@@ -151,14 +160,17 @@ class SafeDodge(PipelineEnv, ABC):
             plane_slide_distance: Distance from the platform centre where the sliding plane starts.
             plane_slide_fraction: With plane_resample_interval: the fraction of new planes that slide
                 through at plane_slide_speed instead of dropping (or appearing).
+            plane_slide_heading: Mean direction a sliding plane travels in, degrees from +x (the way the
+                humanoid faces); 180 = it comes at the humanoid's front.
+            plane_slide_heading_range: Max random deviation from plane_slide_heading in degrees
+                (180 = any direction).
             plane_resample_interval: Steps between new planes (0 = one per episode).
             plane_drop_speed: Speed (m/s) at which each new plane comes down from plane_drop_height
                 to its sampled height, then stops (0 = it appears there). Not for sliding planes.
             plane_drop_height: Height of the plane's centre when it starts dropping.
             plane_offset_range: Max random horizontal offset of the plane from the platform centre.
             plane_height_range: (low, high) random height of the plane's centre.
-            plane_half_size: Half the side of the square plane; None covers the platform.
-            platform_radius: Radius of the platform; a part on the floor past it is a fall.
+            plane_half_size: Half the side of the square plane; None covers the platform.            platform_radius: Radius of the platform; a part on the floor past it is a fall.
             episode_length: Maximum number of steps per episode.
             solver_iterations: Contact/limit solver iterations ('generalized'); None keeps the XML's.
             backend: Physics backend; only 'generalized' is supported.
@@ -189,6 +201,11 @@ class SafeDodge(PipelineEnv, ABC):
         elif plane_slide_fraction > 0.0:
             raise ValueError('plane_slide_fraction needs plane_resample_interval and plane_slide_speed.')
         self._plane_slide_fraction = float(plane_slide_fraction)
+        if not 0.0 <= plane_slide_heading_range <= 180.0:
+            raise ValueError('plane_slide_heading_range must be in [0, 180] degrees.')
+        # Python floats: the defaults give exactly [0, 2 pi), so the planes are drawn as before these settings
+        self._plane_slide_heading_bounds = (math.radians(plane_slide_heading - plane_slide_heading_range),
+                                            math.radians(plane_slide_heading + plane_slide_heading_range))
         self._plane_resample_interval = int(plane_resample_interval)
         self._plane_drop_speed = plane_drop_speed
         self._plane_drop_height = plane_drop_height
@@ -246,9 +263,13 @@ class SafeDodge(PipelineEnv, ABC):
         self._healthy_reward = healthy_reward
         self._height_reward_weight = height_reward_weight
         self._upright_reward_weight = upright_reward_weight
+        if upright_free_distance < 0.0:
+            raise ValueError('upright_free_distance must be >= 0.')
+        self._upright_free_distance = float(upright_free_distance)
         self._still_cost_weight = still_cost_weight
         self._terminate_when_unhealthy = terminate_when_unhealthy
         self._healthy_z_range = healthy_z_range
+        self._fall_on_floor_contact = fall_on_floor_contact
         self._reset_noise_scale = reset_noise_scale
 
         # Hitboxes: every agent geom (brax link i = MuJoCo body i + 1)
@@ -260,6 +281,7 @@ class SafeDodge(PipelineEnv, ABC):
         if not np.all(np.isin(part_types, (sphere, capsule, box))):
             raise ValueError('SafeDodge agents may only use sphere, capsule and box geoms.')
         self._part_names = tuple(mujoco.mj_id2name(mj_model, mujoco.mjtObj.mjOBJ_GEOM, int(g)) for g in part_ids)
+        self._part_is_foot = jp.array(['foot' in name for name in self._part_names])
         self._part_link = jp.array(mj_model.geom_bodyid[part_ids] - 1)
         self._part_pos = jp.array(mj_model.geom_pos[part_ids])
         # Each hitbox is a box grown by a radius (sphere: point, capsule: segment, box: radius 0)
@@ -313,7 +335,11 @@ class SafeDodge(PipelineEnv, ABC):
 
         # Upright reward: how vertical the torso's z axis is
         torso_up = brax_math.rotate(jp.array([0.0, 0.0, 1.0]), pipeline_state.x.rot[0])[2]
-        upright_reward = self._upright_reward_weight * jp.clip(torso_up, 0.0, 1.0)
+        upright = jp.clip(torso_up, 0.0, 1.0)
+        if self._upright_free_distance > 0.0:
+            upright = jp.where(self._plane_torso_distance(pipeline_state) < self._upright_free_distance,
+                               1.0, upright)
+        upright_reward = self._upright_reward_weight * upright
 
         # Stillness cost: horizontal centre-of-mass speed
         _, velocity = self._com_velocity(pipeline_state0, pipeline_state)
@@ -411,22 +437,26 @@ class SafeDodge(PipelineEnv, ABC):
         return jax.tree.map(lambda new, old: jp.where(passed, new, old), new_plane, plane), rng
 
     def _is_healthy(self, pipeline_state: base.State) -> jax.Array:
-        """1.0 unless the torso is out of healthy_z_range or the agent is off the platform."""
+        """1.0 unless the torso is out of healthy_z_range, the agent is off the platform, or (with
+        fall_on_floor_contact) a body part other than the feet rests on the floor."""
         min_z, max_z = self._healthy_z_range
         torso_z = pipeline_state.x.pos[0, 2]
         is_healthy = jp.where((torso_z < min_z) | (torso_z > max_z), 0.0, 1.0)
-        return jp.where(self._part_off_platform(pipeline_state), 0.0, is_healthy)
+        center, on_floor = self._parts_on_floor(pipeline_state)
+        past_edge = jp.linalg.norm(center[:, :2], axis=-1) > self._platform_radius
+        fallen = jp.any(on_floor & past_edge)
+        if self._fall_on_floor_contact:
+            fallen = fallen | jp.any(on_floor & ~self._part_is_foot)
+        return jp.where(fallen, 0.0, is_healthy)
 
     # A body part whose hitbox bottom is within this many metres of the floor rests on it
     _GROUND_CONTACT_MARGIN = 0.02
 
-    def _part_off_platform(self, pipeline_state: base.State) -> jax.Array:
-        """True when any body part rests on the floor past the platform's edge."""
+    def _parts_on_floor(self, pipeline_state: base.State) -> Tuple[jax.Array, jax.Array]:
+        """Hitbox centres (N, 3) and whether each rests on the floor (N,)."""
         center, axes = self._part_frames(pipeline_state)
         bottom = center[:, 2] - self._part_reach(axes, jp.array([0.0, 0.0, 1.0]))
-        on_floor = bottom < self._GROUND_CONTACT_MARGIN
-        past_edge = jp.linalg.norm(center[:, :2], axis=-1) > self._platform_radius
-        return jp.any(on_floor & past_edge)
+        return center, bottom < self._GROUND_CONTACT_MARGIN
 
     def _part_frames(self, pipeline_state: base.State) -> Tuple[jax.Array, jax.Array]:
         """Hitbox centres (N, 3) and local axes (N, 3, 3) in world coordinates."""
@@ -455,7 +485,8 @@ class SafeDodge(PipelineEnv, ABC):
 
     def _sample_plane_slide(self, rng: jax.Array) -> Tuple[jax.Array, jax.Array]:
         """Random plane start offset [x, y] and velocity [x, y]."""
-        angle = jax.random.uniform(rng, (), minval=0.0, maxval=2 * jp.pi)
+        low, high = self._plane_slide_heading_bounds
+        angle = jax.random.uniform(rng, (), minval=low, maxval=high)
         direction = jp.array([jp.cos(angle), jp.sin(angle)])
         return -self._plane_slide_distance * direction, self._plane_slide_speed * direction
 
@@ -517,6 +548,15 @@ class SafeDodge(PipelineEnv, ABC):
         past_edge = jp.maximum(jp.abs(offset @ side_u) - reach(side_u),
                                jp.abs(offset @ side_v) - reach(side_v)) - self._plane_half_size
         return jp.where(past_edge > 0.0, jp.minimum(depth, -past_edge), depth)
+
+    def _plane_torso_distance(self, pipeline_state: DodgeState) -> jax.Array:
+        """Distance (m) from the torso's centre to the nearest point of the plane."""
+        plane = pipeline_state.plane
+        side_u, side_v, normal = plane.axes()
+        offset = pipeline_state.x.pos[0] - plane.pos
+        gap_u = jp.maximum(jp.abs(offset @ side_u) - self._plane_half_size, 0.0)
+        gap_v = jp.maximum(jp.abs(offset @ side_v) - self._plane_half_size, 0.0)
+        return jp.sqrt(gap_u ** 2 + gap_v ** 2 + (offset @ normal) ** 2)
 
     def _constraint_metrics(self, pipeline_state: base.State) -> dict:
         """Safety constraint: summed hitbox overlap with the hazard plane, plus falling."""

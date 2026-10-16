@@ -20,6 +20,9 @@ PYTHON=python
 
 ALG=ppo_pid
 LAMBDA_CLIP=10            # max Lagrange multiplier
+# Episodic cost limit. At 25 level 3 meets it with a slight knee bend (plane cost ~20) and never ducks
+# the low planes; lower it to make ducking pay. Pass the same value to dodge_videos.sh to compare
+SAFETY_BOUND=${SAFETY_BOUND:-25}
 LEVEL=${LEVEL:-3}
 # Total steps = the curriculum's (scripts/dodge_videos.sh) summed over its levels, so the two stay
 # equal; pass the same LEVEL_STEPS to both to change them together
@@ -40,7 +43,7 @@ PPO_ARGS="--learning_rate 3e-4 --entropy_cost 1e-3 --discounting 0.97 --unroll_l
 # 1. Training: a one-level curriculum, so the run folder and checkpoints look like dodge_videos.sh's
 #    and dodge_policy_videos.py finds them unchanged
 $PYTHON -m training.train_curriculum --env_name safe_dodge_humanoid --alg $ALG --levels $LEVEL \
-    --pid_lambda_clip $LAMBDA_CLIP \
+    --pid_lambda_clip $LAMBDA_CLIP --safety_bound $SAFETY_BOUND \
     --level_steps $STEPS --num_envs $NUM_ENVS --batch_size $BATCH_SIZE \
     --num_minibatches $NUM_MINIBATCHES --seeds $SEEDS --model_dir $MODEL_DIR \
     --use_wandb false --skip_video $PPO_ARGS

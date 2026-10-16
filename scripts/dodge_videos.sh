@@ -17,6 +17,7 @@ PYTHON=python
 
 ALG=ppo_pid
 LAMBDA_CLIP=10            # max Lagrange multiplier
+SAFETY_BOUND=${SAFETY_BOUND:-25}              # episodic cost limit (see dodge_no_curriculum.sh)
 LEVELS=${LEVELS:-"1 2 3"}                     # e.g. LEVELS=1 LEVEL_STEPS=3e7 bash scripts/dodge_videos.sh
 LEVEL_STEPS=${LEVEL_STEPS:-"2e7 5e7 3e7"}     # env steps per level (level 1 stands by ~12M; level 3
                                               # from scratch by ~20M)
@@ -33,7 +34,7 @@ PPO_ARGS="--learning_rate 3e-4 --entropy_cost 1e-3 --discounting 0.97 --unroll_l
 
 # 1. Training (the curriculum's own video step crashes, so it is skipped)
 $PYTHON -m training.train_curriculum --env_name safe_dodge_humanoid --alg $ALG --levels $LEVELS \
-    --pid_lambda_clip $LAMBDA_CLIP \
+    --pid_lambda_clip $LAMBDA_CLIP --safety_bound $SAFETY_BOUND \
     --level_steps $LEVEL_STEPS --num_envs $NUM_ENVS --batch_size $BATCH_SIZE \
     --num_minibatches $NUM_MINIBATCHES --seeds $SEEDS --model_dir $MODEL_DIR \
     --use_wandb false --skip_video $PPO_ARGS

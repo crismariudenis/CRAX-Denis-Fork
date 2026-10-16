@@ -41,13 +41,16 @@ def parse_args() -> argparse.Namespace:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--env_name", type=str, default="safe_height_humanoid",
                    help="Environment name from the CRAX registry")
-    p.add_argument("--level", type=int, default=1, choices=[1, 2, 3], help="Difficulty level")
+    p.add_argument("--level", type=int, default=1, choices=[1, 2, 3, 4],
+                   help="Difficulty level (4 only for safe_dodge_humanoid)")
     p.add_argument("--env_kwargs", type=str, default="{}",
                    help="JSON dict of extra env constructor kwargs (see docs/PARAMETERS.md)")
     p.add_argument("--physics", choices=["env", "mujoco"], default="env",
                    help="Step the real CRAX env (JIT) or plain CPU MuJoCo on its model")
     p.add_argument("--actions", choices=["random", "zero"], default="random",
                    help="Action source: uniform random in [-1, 1], or all zeros")
+    p.add_argument("--slowmo", type=float, default=1.0,
+                   help="Playback slowdown: 1 = real time, 5 = five times slower")
     p.add_argument("--seed", type=int, default=0, help="Random seed")
     p.add_argument("--poll", type=float, default=1.0, help="Seconds between file-change checks")
     p.add_argument("--watch", type=str, nargs="*", default=[str(REPO_ROOT / "crax")],
@@ -157,7 +160,9 @@ def run_viewer(args) -> None:
     from crax import envs
 
     env = envs.get_environment(args.env_name, level=args.level, **json.loads(args.env_kwargs))
-    model = env.sys.mj_model
+    # The dodge envs keep their hazard plane out of the physics; their render model has it as a mocap body
+    model = getattr(env, "_render_model", env.sys.mj_model)
+    plane_mocap = getattr(env, "_plane_mocap", None)
     data = mujoco.MjData(model)
     dt = float(env.dt)
     episode_length = getattr(env, "episode_length", 1000)
@@ -173,6 +178,9 @@ def run_viewer(args) -> None:
     def show(state):
         data.qpos[:] = np.asarray(state.pipeline_state.q)
         data.qvel[:] = np.asarray(state.pipeline_state.qd)
+        if plane_mocap is not None:
+            data.mocap_pos[plane_mocap] = np.asarray(state.pipeline_state.plane.pos)
+            data.mocap_quat[plane_mocap] = np.asarray(state.pipeline_state.plane.rot)
         mujoco.mj_forward(model, data)
 
     def sample_action():
@@ -228,7 +236,7 @@ def run_viewer(args) -> None:
             if tick - last_cam_save > 1.0:
                 save_camera(viewer, args._cam_file)
                 last_cam_save = tick
-            time.sleep(max(0.0, dt - (time.time() - tick)))  # Real-time playback.
+            time.sleep(max(0.0, dt * args.slowmo - (time.time() - tick)))  # Real time at --slowmo 1
         save_camera(viewer, args._cam_file)
 
 

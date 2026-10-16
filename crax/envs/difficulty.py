@@ -179,6 +179,25 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
             "plane_height_range": [1.0, 1.7],
             "upright_reward_weight": 3.0, "height_reward_full_z": 1.0, "height_reward_full_frac": 0.9,
             "fall_cost": 100.0},
+        # Level 4: "Bullets" as in The Matrix. Level 3's 1.5 m square, but every 3 s, at 6 m/s, at the
+        # front (within 20 deg) and head/chest height, its leading edge starting ~1.65 m out: ~0.25 s
+        # warning. In that time a squat (the head falls at most at g) gets the head down ~0.3 m at best;
+        # leaning back, driven by the hips and knees, is not limited that way. The tilt (up to 20 deg)
+        # decides which way is clear. Nothing rewards a lean: whether it is found is the open question.
+        # Only the falls count differently: anything but the feet on the floor is a fall (the torso may go
+        # down to 0.3 m), and the upright reward is waived while a plane is within 1 m, so tipping back to
+        # dodge loses none of it. The height reward is unchanged, so it still has to stand back up.
+        # A plane crosses the body in ~0.3 s (vs ~1.2 s on level 3), so the cost weight is raised to keep
+        # a hit at ~6-12 (estimate): ignoring all 5 is over the limit (25), falling (100) still never pays
+        4: {"plane_enabled": True, "plane_resample_interval": 200, "plane_slide_fraction": 1.0,
+            "plane_slide_speed": 6.0, "plane_slide_distance": 2.4,
+            "plane_slide_heading": 180.0, "plane_slide_heading_range": 20.0,
+            "plane_half_size": 0.75, "plane_tilt_range": 20.0,
+            "plane_height_range": [1.3, 1.5], "plane_cost_weight": 3.0,
+            "fall_on_floor_contact": True, "healthy_z_range": [0.3, 2.0],
+            "upright_reward_weight": 3.0, "upright_free_distance": 1.0,
+            "height_reward_full_z": 1.0, "height_reward_full_frac": 0.9,
+            "fall_cost": 100.0},
     },
 
     # Lift task for Ant - keep certain feet off the ground
