@@ -536,7 +536,7 @@ class SafeBullets(PipelineEnv, ABC):
         return jp.where(torso_radius > self._platform_radius, 0.0, is_healthy)
 
     # Metrics that are also copied into state.info each step.
-    _INFO_KEYS = ('cost', 'bullet_distance', 'bullet_violation', 'fall_cost')
+    _INFO_KEYS = ('cost', 'bullet_distance', 'bullet_violation', 'fall_cost', 'dodged_bullets')
 
     def _metrics(
             self, pipeline_state0: base.State, pipeline_state: base.State,
@@ -557,6 +557,7 @@ class SafeBullets(PipelineEnv, ABC):
             'x_velocity': velocity[0],
             'y_velocity': velocity[1],
             **self._constraint_metrics(pipeline_state),
+            'dodged_bullets': jp.array(0.0, dtype=jp.float32),
         }
 
     def _get_obs(
@@ -661,6 +662,8 @@ class SafeBullets(PipelineEnv, ABC):
         info = {k: metrics[k] for k in self._INFO_KEYS}
         info["step_count"] = 0
         info["bullet_rng"] = rng4  # for bullet resets during episode
+        info["bullet_hit_flags"] = jp.zeros((self._num_bullets,), dtype=jp.bool_)
+        info["dodged_bullets"] = jp.array(0.0, dtype=jp.float32)
 
         return State(pipeline_state, obs, reward, done, metrics, info)
 
@@ -675,11 +678,36 @@ class SafeBullets(PipelineEnv, ABC):
         pipeline_state0 = state.pipeline_state
         pipeline_state = self.pipeline_step(pipeline_state0, action)
 
-        # Update bullets: constant velocity, reset when past humanoid
+        # Track bullet hits until each bullet passes the humanoid and resets.
+        # This does not change bullet movement or reset behavior.
         step_count = state.info.get("step_count", 0)
+        previous_hit_flags = state.info.get(
+            "bullet_hit_flags", jp.zeros((self._num_bullets,), dtype=jp.bool_))
+        previous_bullet_pos, previous_bullet_vel = self._get_bullet_pos_vel(pipeline_state0)
+        next_bullet_pos = (
+            previous_bullet_pos[:self._num_bullets]
+            + previous_bullet_vel[:self._num_bullets] * self.dt
+        )
+        bullets_resetting = next_bullet_pos[:, 0] < self._bullet_reset_x
+        hit_this_step = jp.any(self._bullet_overlaps(pipeline_state) > 0.0, axis=0)
+        dodged_this_step = jp.sum(
+            bullets_resetting & ~(previous_hit_flags | hit_this_step)
+        ).astype(jp.int32)
+        dodged_bullets = state.info.get(
+            "dodged_bullets", jp.array(0.0, dtype=jp.float32)
+        )
+        dodged_bullets = dodged_bullets + dodged_this_step.astype(jp.float32)
+        bullet_hit_flags = jp.where(
+            bullets_resetting,
+            jp.zeros((self._num_bullets,), dtype=jp.bool_),
+            previous_hit_flags | hit_this_step,
+        )
+
         pipeline_state = self._update_bullets(pipeline_state0, pipeline_state, step_count)
 
         new_info = dict(state.info)
+        new_info["bullet_hit_flags"] = bullet_hit_flags
+        new_info["dodged_bullets"] = dodged_bullets
 
         # Healthy reward
         min_z, _ = self._healthy_z_range
@@ -706,10 +734,12 @@ class SafeBullets(PipelineEnv, ABC):
         # Update metrics
         metrics = self._metrics(
             pipeline_state0, pipeline_state, healthy_reward, height_reward, ctrl_cost)
+        metrics["dodged_bullets"] = dodged_this_step.astype(jp.float32)
         state.metrics.update(metrics)
 
         # Update info dictionary with cost
         new_info.update({k: metrics[k] for k in self._INFO_KEYS})
+        new_info["dodged_bullets"] = dodged_bullets
         new_info["step_count"] = step_count + 1
 
         return state.replace(
