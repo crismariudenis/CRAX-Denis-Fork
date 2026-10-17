@@ -76,7 +76,7 @@ python scripts/safe_bullets_policy_videos.py \
     --levels $LEVELS \
     --steps 1000 \
     --fps 60 \
-    --cameras front side fixedfar
+    --cameras front side fixedfar orbit
 
 echo "=========================================="
 echo "Training and video generation complete!"

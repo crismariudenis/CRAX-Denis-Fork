@@ -36,7 +36,8 @@ def parse_args():
                    help="Checkpoint stage number, if applicable")
     p.add_argument("--steps", type=int, default=1000)
     p.add_argument("--cameras", nargs="+",
-                   default=["front", "side", "fixedfar"])
+                   default=["front", "side", "fixedfar", "orbit"],
+                   help="Camera views; orbit makes a full 360-degree sweep")
     p.add_argument("--fps", type=int, default=60)
     p.add_argument("--width", type=int, default=640)
     p.add_argument("--height", type=int, default=480)
@@ -101,25 +102,55 @@ def latest_checkpoint(run_dir, stage):
     return checkpoints[-1]
 
 
-def overlay_metrics(frames, returns, costs):
+def render_orbit(env, trajectory, height, width):
+    """Render a trajectory with a free camera making one full 360-degree sweep."""
+    import mujoco
+
+    model = env.sys.mj_model
+    renderer = mujoco.Renderer(model, height=height, width=width)
+    data = mujoco.MjData(model)
+    camera = mujoco.MjvCamera()
+    camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+    camera.distance = 3.0
+    camera.elevation = -5.0
+    camera.lookat[:] = [0.0, 0.0, 0.9]
+
+    frames = []
+    count = max(len(trajectory), 1)
+    try:
+        for i, state in enumerate(trajectory):
+            data.qpos = state.q
+            data.qvel = state.qd
+            mujoco.mj_forward(model, data)
+            camera.azimuth = -180.0 + 360.0 * i / count
+            renderer.update_scene(data, camera=camera)
+            frames.append(renderer.render())
+    finally:
+        renderer.close()
+    return frames
+
+
+def overlay_metrics(frames, returns, costs, dodged_counts):
     try:
         font = ImageFont.truetype("DejaVuSans-Bold.ttf", 20)
     except (OSError, IOError):
         font = ImageFont.load_default()
 
     output = []
-    for frame, ret, cost in zip(frames, returns, costs):
+    for frame, ret, cost, dodged in zip(frames, returns, costs, dodged_counts):
         img = Image.fromarray(np.asarray(frame, dtype=np.uint8))
         draw = ImageDraw.Draw(img)
 
         for i, label in enumerate(
-            [f"Return: {ret:.2f}", f"Cost: {cost:.2f}"]
+            [f"Return: {ret:.2f}", f"Cost: {cost:.2f}",
+             f"Bullets dodged: {int(dodged)}"]
         ):
             draw.text(
                 (10, 10 + 30 * i),
                 label,
                 font=font,
-                fill=(50, 220, 50) if i == 0 else (230, 60, 60),
+                fill=((50, 220, 50) if i == 0 else
+                      (230, 60, 60) if i == 1 else (80, 190, 255)),
                 stroke_width=2,
                 stroke_fill=(0, 0, 0),
             )
@@ -148,6 +179,7 @@ def record_level(policy, level, args, out_prefix):
     total_cost = 0.0
     returns = [0.0]
     costs = [0.0]
+    dodged_counts = [0.0]
     falls = 0
 
     for _ in range(args.steps):
@@ -160,6 +192,8 @@ def record_level(policy, level, args, out_prefix):
         total_cost += float(state.info["cost"])
         returns.append(total_reward)
         costs.append(total_cost)
+        # Environment info holds the episode-level cumulative dodge counter.
+        dodged_counts.append(float(state.info.get("dodged_bullets", 0.0)))
 
         if bool(state.done):
             falls += 1
@@ -171,13 +205,16 @@ def record_level(policy, level, args, out_prefix):
     print(f"Level {level}: {args.steps} steps, {falls} falls")
 
     for camera in args.cameras:
-        frames = env.render(
-            trajectory,
-            height=args.height,
-            width=args.width,
-            camera=camera,
-        )
-        frames = overlay_metrics(frames, returns, costs)
+        if camera == "orbit":
+            frames = render_orbit(env, trajectory, args.height, args.width)
+        else:
+            frames = env.render(
+                trajectory,
+                height=args.height,
+                width=args.width,
+                camera=camera,
+            )
+        frames = overlay_metrics(frames, returns, costs, dodged_counts)
 
         out_path = (
             REPO_ROOT / "videos" /
