@@ -94,6 +94,17 @@ def train_ppo_cost(
         restore_checkpoint_path: Optional[str] = None,
         restore_params: Optional[Any] = None,
         restore_value_fn: bool = True,
+        # --- added for the RQ experiments -------------------------------
+        # These used to fall into **kwargs, so `filter_kwargs_for_fn` (which
+        # only forwards *named* parameters) silently dropped them when
+        # ppo_cost was started from train_env.py / train_curriculum.py.
+        max_devices_per_host: Optional[int] = None,
+        num_evals: int = 0,
+        num_eval_envs: int = 128,
+        deterministic_eval: bool = False,
+        max_grad_norm: Optional[float] = None,
+        normalize_advantage: bool = True,
+        pretrained_params: Optional[Any] = None,
         **kwargs,
 ) -> Tuple[ppo_train.InferenceParams, ppo_train.Metrics]:
     """Runs standard PPO optimizing reward - cost_weight * cost.
@@ -134,8 +145,15 @@ def train_ppo_cost(
         progress_fn=progress_fn,
         save_checkpoint_path=save_checkpoint_path,
         restore_checkpoint_path=restore_checkpoint_path,
-        restore_params=restore_params,
+        # `pretrained_params` is the name the curriculum loop uses for warm starts
+        restore_params=pretrained_params if pretrained_params is not None else restore_params,
         restore_value_fn=restore_value_fn,
+        max_devices_per_host=max_devices_per_host,
+        num_evals=num_evals,
+        num_eval_envs=num_eval_envs,
+        deterministic_eval=deterministic_eval,
+        max_grad_norm=max_grad_norm,
+        normalize_advantage=normalize_advantage,
         eval_env=eval_env,
         **kwargs,
     )
