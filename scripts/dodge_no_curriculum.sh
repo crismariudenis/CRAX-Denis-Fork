@@ -6,6 +6,7 @@
 # directly. Runs from before 2026-10-15 used other level settings (no upright reward on level 3,
 # fall cost 25) and don't compare with these.
 #   nohup bash scripts/dodge_no_curriculum.sh > dodge_no_curriculum.log 2>&1 &
+# Defaults: cost limit 5, multiplier cap 30 (override with SAFETY_BOUND=... LAMBDA_CLIP=...)
 set -e
 # Keep the machine from going to sleep while this runs: after a suspend the GPU job hangs.
 # Skipped where systemd-inhibit isn't allowed (e.g. a cluster)
@@ -13,16 +14,23 @@ if [ -z "$DODGE_NO_SLEEP" ] && command -v systemd-inhibit >/dev/null \
         && systemd-inhibit --what=sleep:idle true 2>/dev/null; then
     DODGE_NO_SLEEP=1 exec systemd-inhibit --what=sleep:idle --why="dodge training" bash "$0" "$@"
 fi
+# systemd-inhibit starts the script again with signals reset, undoing nohup: closing the terminal
+# then killed the run ("bash terminated by signal HUP"). Ignore hangups here; the training inherits it
+trap '' HUP
 cd "$(dirname "$0")/.."
 # The venv's python, so the script also runs from a shell where the venv isn't active
 PYTHON=python
 [ -x .venv/bin/python ] && PYTHON=.venv/bin/python
 
 ALG=ppo_pid
-LAMBDA_CLIP=10            # max Lagrange multiplier
+# Max Lagrange multiplier. The loss is adv - lambda * cost_adv, each normalized to std 1, so lambda is how much
+# more the cost counts than the reward. At 10, with planes down to 0.9 m and limit 5, it sat at the cap and
+# stood tall taking hits (plane cost ~19). Higher pushes harder, but the reward (standing back up) counts less:
+# at 30 it knelt the whole episode until level 3 made anything but the feet on the floor a fall
+LAMBDA_CLIP=${LAMBDA_CLIP:-30}
 # Episodic cost limit. At 25 level 3 meets it with a slight knee bend (plane cost ~20) and never ducks
-# the low planes; lower it to make ducking pay. Pass the same value to dodge_videos.sh to compare
-SAFETY_BOUND=${SAFETY_BOUND:-25}
+# the low planes; 5 makes ducking pay. Same default in dodge_videos.sh, so the two compare
+SAFETY_BOUND=${SAFETY_BOUND:-5}
 LEVEL=${LEVEL:-3}
 # Total steps = the curriculum's (scripts/dodge_videos.sh) summed over its levels, so the two stay
 # equal; pass the same LEVEL_STEPS to both to change them together

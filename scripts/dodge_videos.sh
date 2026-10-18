@@ -3,6 +3,7 @@
 # level (sd_<id>_stage<n>_lvl<n>_*), and the final policy on every level (sd_<id>_lvl<level>_*).
 # 1e8 steps in all by default (level 2 gets the most: it never met its budget in 6e7 before), the same as scripts/dodge_no_curriculum.sh, so the two compare directly.
 #   nohup bash scripts/dodge_videos.sh > dodge_curriculum.log 2>&1 &
+# Defaults: cost limit 5, multiplier cap 30 (override with SAFETY_BOUND=... LAMBDA_CLIP=...)
 set -e
 # Keep the machine from going to sleep while this runs: after a suspend the GPU job hangs.
 # Skipped where systemd-inhibit isn't allowed (e.g. a cluster)
@@ -10,14 +11,17 @@ if [ -z "$DODGE_NO_SLEEP" ] && command -v systemd-inhibit >/dev/null \
         && systemd-inhibit --what=sleep:idle true 2>/dev/null; then
     DODGE_NO_SLEEP=1 exec systemd-inhibit --what=sleep:idle --why="dodge training" bash "$0" "$@"
 fi
+# systemd-inhibit starts the script again with signals reset, undoing nohup: closing the terminal
+# then killed the run ("bash terminated by signal HUP"). Ignore hangups here; the training inherits it
+trap '' HUP
 cd "$(dirname "$0")/.."
 # The venv's python, so the script also runs from a shell where the venv isn't active
 PYTHON=python
 [ -x .venv/bin/python ] && PYTHON=.venv/bin/python
 
 ALG=ppo_pid
-LAMBDA_CLIP=10            # max Lagrange multiplier
-SAFETY_BOUND=${SAFETY_BOUND:-25}              # episodic cost limit (see dodge_no_curriculum.sh)
+LAMBDA_CLIP=${LAMBDA_CLIP:-30}                # max Lagrange multiplier (see dodge_no_curriculum.sh)
+SAFETY_BOUND=${SAFETY_BOUND:-5}               # episodic cost limit (see dodge_no_curriculum.sh)
 LEVELS=${LEVELS:-"1 2 3"}                     # e.g. LEVELS=1 LEVEL_STEPS=3e7 bash scripts/dodge_videos.sh
 LEVEL_STEPS=${LEVEL_STEPS:-"2e7 5e7 3e7"}     # env steps per level (level 1 stands by ~12M; level 3
                                               # from scratch by ~20M)

@@ -159,7 +159,7 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
         # sideways speed was 0 for levels 1-2, its normalizer std hit the 1e-6 floor, and level 3's
         # 1.5 m/s came out as ~1e6: the level-2 policy fell at once on level 3
         1: {"plane_enabled": False, "fall_cost": 0.0, "upright_reward_weight": 5.0,
-            "plane_height_range": [1.0, 1.9], "plane_tilt_range": 20.0, "plane_offset_range": 0.3,
+            "plane_height_range": [0.9, 1.9], "plane_tilt_range": 20.0, "plane_offset_range": 0.3,
             "plane_resample_interval": 250, "plane_drop_speed": 0.75,
             "plane_slide_fraction": 0.25, "plane_slide_speed": 1.5, "plane_slide_distance": 3.0},
         # Levels 2-3 duck with the knees, not the waist: the torso stays vertical (upright reward) and
@@ -168,15 +168,17 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
         # never pays
         # Level 2: Every 3.75 s a plane at a random height, tilt and offset comes down from above and stops;
         # a quarter of them slide through from 3 m away instead (the plane is ~2.2 m half-size here)
-        2: {"plane_enabled": True, "plane_height_range": [1.0, 1.9], "plane_tilt_range": 20.0,
+        2: {"plane_enabled": True, "plane_height_range": [0.9, 1.9], "plane_tilt_range": 20.0,
             "plane_offset_range": 0.3, "plane_resample_interval": 250, "plane_drop_speed": 0.75,
             "plane_slide_fraction": 0.25, "plane_slide_speed": 1.5, "plane_slide_distance": 3.0,
             "upright_reward_weight": 3.0, "height_reward_full_z": 1.0, "height_reward_full_frac": 0.9,
             "fall_cost": 100.0},
-        # Level 3: 1.5 m square planes fly through from random directions, one every ~2.7 s
+        # Level 3: 1.5 m square planes fly through from random directions, one every ~2.7 s. Anything but the
+        # feet on the floor is a fall: without that, a policy at multiplier cap 30 knelt the whole episode,
+        # which clears every plane
         3: {"plane_enabled": True, "plane_slide_speed": 1.5, "plane_slide_distance": 2.0,
             "plane_half_size": 0.75, "plane_tilt_range": 20.0,
-            "plane_height_range": [1.0, 1.7],
+            "plane_height_range": [0.9, 1.7], "fall_on_floor_contact": True,
             "upright_reward_weight": 3.0, "height_reward_full_z": 1.0, "height_reward_full_frac": 0.9,
             "fall_cost": 100.0},
         # Level 4: "Bullets" as in The Matrix. Level 3's 1.5 m square, but every 3 s, at 6 m/s, at the
