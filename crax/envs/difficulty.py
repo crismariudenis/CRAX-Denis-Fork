@@ -215,7 +215,6 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
             "bullet_target_z_std": 0.40,
             "bullet_vel_y_range": [0.0, 0.0],
             "bullet_vel_z_range": [0.0, 0.0],
-            "bullet_radius_range": [0.04, 0.06],
         },
         # Level 2: 3 bullets at a time, increased speed
         2: {
@@ -229,7 +228,6 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
             "bullet_target_z_std": 0.35,
             "bullet_vel_y_range": [0.0, 0.0],
             "bullet_vel_z_range": [0.0, 0.0],
-            "bullet_radius_range": [0.04, 0.07],
         },
         # Level 3: All 6 bullets, further increased speed, tightest aim
         3: {
@@ -243,7 +241,6 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
             "bullet_target_z_std": 0.30,
             "bullet_vel_y_range": [0.0, 0.0],
             "bullet_vel_z_range": [0.0, 0.0],
-            "bullet_radius_range": [0.04, 0.08],
         },
     },
 }

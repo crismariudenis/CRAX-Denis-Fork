@@ -139,7 +139,7 @@
             <joint name="bullet0_slide_z" type="slide" axis="0 0 1" limited="false" armature="0" damping="0"/>
             <inertial pos="0 0 0" mass="0.001" diaginertia="1e-6 1e-6 1e-6"/>
             <body name="bullet0" pos="0 0 0">
-                <geom name="bullet0" type="sphere" size="0.05" rgba="1 0 0 1" contype="0" conaffinity="0" mass="0.001"/>
+                <geom name="bullet0" type="sphere" size="0.03" rgba="1 0 0 1" contype="0" conaffinity="0" mass="0.001"/>
             </body>
         </body>
         <body name="bullet1_slider" pos="0 0 0">
@@ -148,7 +148,7 @@
             <joint name="bullet1_slide_z" type="slide" axis="0 0 1" limited="false" armature="0" damping="0"/>
             <inertial pos="0 0 0" mass="0.001" diaginertia="1e-6 1e-6 1e-6"/>
             <body name="bullet1" pos="0 0 0">
-                <geom name="bullet1" type="sphere" size="0.05" rgba="1 0 0 1" contype="0" conaffinity="0" mass="0.001"/>
+                <geom name="bullet1" type="sphere" size="0.03" rgba="1 0 0 1" contype="0" conaffinity="0" mass="0.001"/>
             </body>
         </body>
         <body name="bullet2_slider" pos="0 0 0">
@@ -157,7 +157,7 @@
             <joint name="bullet2_slide_z" type="slide" axis="0 0 1" limited="false" armature="0" damping="0"/>
             <inertial pos="0 0 0" mass="0.001" diaginertia="1e-6 1e-6 1e-6"/>
             <body name="bullet2" pos="0 0 0">
-                <geom name="bullet2" type="sphere" size="0.05" rgba="1 0 0 1" contype="0" conaffinity="0" mass="0.001"/>
+                <geom name="bullet2" type="sphere" size="0.03" rgba="1 0 0 1" contype="0" conaffinity="0" mass="0.001"/>
             </body>
         </body>
         <body name="bullet3_slider" pos="0 0 0">
@@ -166,7 +166,7 @@
             <joint name="bullet3_slide_z" type="slide" axis="0 0 1" limited="false" armature="0" damping="0"/>
             <inertial pos="0 0 0" mass="0.001" diaginertia="1e-6 1e-6 1e-6"/>
             <body name="bullet3" pos="0 0 0">
-                <geom name="bullet3" type="sphere" size="0.05" rgba="1 0 0 1" contype="0" conaffinity="0" mass="0.001"/>
+                <geom name="bullet3" type="sphere" size="0.03" rgba="1 0 0 1" contype="0" conaffinity="0" mass="0.001"/>
             </body>
         </body>
         <body name="bullet4_slider" pos="0 0 0">
@@ -175,7 +175,7 @@
             <joint name="bullet4_slide_z" type="slide" axis="0 0 1" limited="false" armature="0" damping="0"/>
             <inertial pos="0 0 0" mass="0.001" diaginertia="1e-6 1e-6 1e-6"/>
             <body name="bullet4" pos="0 0 0">
-                <geom name="bullet4" type="sphere" size="0.05" rgba="1 0 0 1" contype="0" conaffinity="0" mass="0.001"/>
+                <geom name="bullet4" type="sphere" size="0.03" rgba="1 0 0 1" contype="0" conaffinity="0" mass="0.001"/>
             </body>
         </body>
         <body name="bullet5_slider" pos="0 0 0">
@@ -184,7 +184,7 @@
             <joint name="bullet5_slide_z" type="slide" axis="0 0 1" limited="false" armature="0" damping="0"/>
             <inertial pos="0 0 0" mass="0.001" diaginertia="1e-6 1e-6 1e-6"/>
             <body name="bullet5" pos="0 0 0">
-                <geom name="bullet5" type="sphere" size="0.05" rgba="1 0 0 1" contype="0" conaffinity="0" mass="0.001"/>
+                <geom name="bullet5" type="sphere" size="0.03" rgba="1 0 0 1" contype="0" conaffinity="0" mass="0.001"/>
             </body>
         </body>
     </worldbody>

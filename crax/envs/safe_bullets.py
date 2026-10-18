@@ -102,12 +102,13 @@ class SafeBullets(PipelineEnv, ABC):
             ctrl_cost_weight=0.1,
             healthy_reward=5.0,
             height_reward_weight: float = 5.0,
+            upright_reward_weight: float = 2.0,
             terminate_when_unhealthy=True,
             healthy_z_range: Optional[Tuple[float, float]] = None,
             reset_noise_scale=1e-2,
             num_bullets: int = 4,
             bullet_speed_range: Tuple[float, float] = (3.0, 6.0),
-            bullet_radius_range: Tuple[float, float] = (0.04, 0.08),
+            bullet_radius: float = 0.03,
             bullet_spawn_x_range: Tuple[float, float] = (2.0, 5.0),
             bullet_spawn_y_range: Tuple[float, float] = (-1.5, 1.5),
             bullet_spawn_z_range: Tuple[float, float] = (0.05, 1.7),
@@ -120,7 +121,7 @@ class SafeBullets(PipelineEnv, ABC):
             bullet_reset_x: float = -1.0,
             bullet_cost_weight: float = 1.25,
             fall_cost: float = 25.0,
-            platform_radius: float = 0.5,
+            platform_radius: float = 0.75,
             episode_length: int = 1000,
             backend: str = 'generalized',
             **kwargs,
@@ -138,7 +139,7 @@ class SafeBullets(PipelineEnv, ABC):
             reset_noise_scale: Scale of noise added to initial state.
             num_bullets: Number of bullets to spawn (max 6, limited by XML).
             bullet_speed_range: (min, max) speed in m/s for bullet x-velocity (negative).
-            bullet_radius_range: (min, max) radius in metres for bullet spheres.
+            bullet_radius: Fixed bullet sphere radius in metres.
             bullet_spawn_x_range: (min, max) x-position for bullet spawn (front of humanoid).
             bullet_spawn_y_range: (min, max) y-position for bullet spawn.
             bullet_spawn_z_range: (min, max) z-position for bullet spawn. Hard limits
@@ -161,12 +162,12 @@ class SafeBullets(PipelineEnv, ABC):
             episode_length: Maximum number of steps per episode.
             backend: Physics backend ('generalized', 'spring', 'positional', 'mjx').
         """
-        if num_bullets < 1 or num_bullets > 6:
-            raise ValueError('num_bullets must be between 1 and 6 (limited by XML).')
+        if num_bullets < 0 or num_bullets > 6:
+            raise ValueError('num_bullets must be between 0 and 6 (limited by XML).')
         if bullet_speed_range[0] <= 0 or bullet_speed_range[1] <= 0:
             raise ValueError('bullet_speed_range must be positive (speed magnitude).')
-        if bullet_radius_range[0] <= 0 or bullet_radius_range[1] <= 0:
-            raise ValueError('bullet_radius_range must be positive.')
+        if bullet_radius <= 0:
+            raise ValueError('bullet_radius must be positive.')
         if bullet_spawn_x_range[0] <= 0:
             raise ValueError('bullet_spawn_x_range min must be positive (in front of humanoid).')
         if bullet_target_y_std < 0 or bullet_target_z_std < 0:
@@ -176,7 +177,7 @@ class SafeBullets(PipelineEnv, ABC):
 
         self._num_bullets = num_bullets
         self._bullet_speed_range = bullet_speed_range
-        self._bullet_radius_range = bullet_radius_range
+        self._bullet_radius = float(bullet_radius)
         self._bullet_spawn_x_range = bullet_spawn_x_range
         self._bullet_spawn_y_range = bullet_spawn_y_range
         self._bullet_spawn_z_range = bullet_spawn_z_range
@@ -195,6 +196,8 @@ class SafeBullets(PipelineEnv, ABC):
         path = epath.resource_path('crax') / self.agent_xml_path
         xml_string = path.read_text()
         xml_string = xml_string.replace('PLATFORM_RADIUS', str(float(platform_radius)))
+        # Keep the visual and collision geometry consistent with the fixed bullet radius.
+        xml_string = xml_string.replace('size="0.05" rgba="1 0 0 1"', f'size="{self._bullet_radius}" rgba="1 0 0 1"')
 
         # Parse the modified XML
         sys = mjcf.loads(xml_string)
@@ -223,6 +226,7 @@ class SafeBullets(PipelineEnv, ABC):
         self._ctrl_cost_weight = ctrl_cost_weight
         self._healthy_reward = healthy_reward
         self._height_reward_weight = height_reward_weight
+        self._upright_reward_weight = upright_reward_weight
         self._terminate_when_unhealthy = terminate_when_unhealthy
         self._reset_noise_scale = reset_noise_scale
         self._healthy_z_range = (
@@ -259,9 +263,14 @@ class SafeBullets(PipelineEnv, ABC):
         # A capsule's axis is its geom's local z; a sphere/box gets half-length 0
         self._part_axis = jax.vmap(brax_math.rotate, in_axes=(None, 0))(
             jp.array([0.0, 0.0, 1.0]), jp.array(mj_model.geom_quat[part_ids]))
-        self._part_radius = jp.array(mj_model.geom_size[part_ids, 0])
+        # Capsules use their radial size; boxes use a conservative bounding sphere
+        # for bullet overlap and floor-support checks.
+        part_sizes = mj_model.geom_size[part_ids]
+        self._part_radius = jp.array(np.where(
+            part_types == box, np.linalg.norm(part_sizes[:, :3], axis=1), part_sizes[:, 0]))
         self._part_half_length = jp.array(
-            np.where(part_types == capsule, mj_model.geom_size[part_ids, 1], 0.0))
+            np.where(part_types == capsule, part_sizes[:, 1], 0.0))
+        self._part_is_box = jp.array(part_types == box)
 
     def _find_bullet_indices(self):
         """Find bullet body/joint IDs from the MuJoCo model.
@@ -300,7 +309,7 @@ class SafeBullets(PipelineEnv, ABC):
         self._bullet_links_list = [int(link) for link in self._bullet_links]
 
     def _sample_bullet_initial_conditions(
-            self, rng: jax.Array, target_yz=None) -> Tuple[jax.Array, jax.Array, jax.Array]:
+            self, rng: jax.Array, target_yz=None) -> Tuple[jax.Array, jax.Array]:
         """Sample random spawn position, velocity, and radius for each bullet.
 
         x is uniform in bullet_spawn_x_range. y and z are normal around the body
@@ -312,7 +321,7 @@ class SafeBullets(PipelineEnv, ABC):
             velocities: (num_bullets, 3) array of velocities
             radii: (num_bullets,) array of radii
         """
-        rng_pos_x, rng_pos_y, rng_pos_z, rng_vel_x, rng_vel_y, rng_vel_z, rng_rad = jax.random.split(rng, 7)
+        rng_pos_x, rng_pos_y, rng_pos_z, rng_vel_x, rng_vel_y, rng_vel_z = jax.random.split(rng, 6)
 
         # Spawn positions: x in front, y/z spread around humanoid
         pos_x = jax.random.uniform(rng_pos_x, (self._num_bullets,),
@@ -338,12 +347,7 @@ class SafeBullets(PipelineEnv, ABC):
                                    maxval=self._bullet_vel_z_range[1])
         velocities = jp.stack([vel_x, vel_y, vel_z], axis=1)
 
-        # Radii
-        radii = jax.random.uniform(rng_rad, (self._num_bullets,),
-                                   minval=self._bullet_radius_range[0],
-                                   maxval=self._bullet_radius_range[1])
-
-        return positions, velocities, radii
+        return positions, velocities
 
     def _set_bullet_qpos_qvel(self, qpos: jax.Array, qvel: jax.Array, positions: jax.Array, velocities: jax.Array) -> Tuple[jax.Array, jax.Array]:
         """Set bullet positions and velocities in qpos/qvel arrays."""
@@ -357,7 +361,7 @@ class SafeBullets(PipelineEnv, ABC):
         return qpos, qvel
 
     def _update_bullets(self, pipeline_state0: base.State, pipeline_state: base.State,
-                        step_count: jax.Array) -> base.State:
+                        rng: jax.Array) -> Tuple[base.State, jax.Array]:
         """Move bullets at constant velocity, reset when past humanoid.
 
         Position and velocity are taken from the state BEFORE the physics step
@@ -367,11 +371,14 @@ class SafeBullets(PipelineEnv, ABC):
         Args:
             pipeline_state0: Physics state before the step (source of bullet pos/vel)
             pipeline_state: Physics state after the step (bullet entries get overwritten)
-            step_count: Current step number (for time-based updates)
+            rng: Per-environment random key carried in state.info
 
         Returns:
             Updated pipeline state with new bullet positions
         """
+        if self._num_bullets == 0:
+            return pipeline_state, rng
+
         dt = self.dt
         all_bullet_pos, all_bullet_vel = self._get_bullet_pos_vel(pipeline_state0)
         bullet_pos = all_bullet_pos[:self._num_bullets]
@@ -383,14 +390,13 @@ class SafeBullets(PipelineEnv, ABC):
         # Check which bullets need reset (passed behind humanoid)
         needs_reset = new_pos[:, 0] < self._bullet_reset_x
 
-        # For bullets that need reset, sample new initial conditions
-        # We use step_count as a seed for deterministic but varied resets
-        rng = jax.random.fold_in(jax.random.PRNGKey(0), step_count)
-        rng = jax.random.fold_in(rng, jp.sum(new_pos[:, 0] < self._bullet_reset_x).astype(jp.int32))
+        # Advance the environment-local key, so parallel environments do not
+        # replay the same bullet sequence.
+        rng, sample_rng = jax.random.split(rng)
         target = None
         if self._bullet_aim_at_agent:
             target = (pipeline_state0.x.pos[0, 1], self._bullet_target_z_mean)
-        new_positions, new_velocities, new_radii = self._sample_bullet_initial_conditions(rng, target)
+        new_positions, new_velocities = self._sample_bullet_initial_conditions(sample_rng, target)
 
         # Where reset is needed, use new positions/velocities; otherwise keep current
         new_pos = jp.where(needs_reset[:, None], new_positions, new_pos)
@@ -419,8 +425,8 @@ class SafeBullets(PipelineEnv, ABC):
         x_pos = pipeline_state.x.pos.at[jp.array(self._bullet_links_list, dtype=jp.int32)].set(full_new_pos)
         x_vel = pipeline_state.xd.vel.at[jp.array(self._bullet_links_list, dtype=jp.int32)].set(full_new_vel)
 
-        return pipeline_state.replace(q=qpos, qd=qvel, x=pipeline_state.x.replace(pos=x_pos),
-                                       xd=pipeline_state.xd.replace(vel=x_vel))
+        return (pipeline_state.replace(q=qpos, qd=qvel, x=pipeline_state.x.replace(pos=x_pos),
+                                        xd=pipeline_state.xd.replace(vel=x_vel)), rng)
 
     def _bullet_overlaps(self, pipeline_state: base.State) -> jax.Array:
         """Compute penetration depth of each body part into each bullet sphere.
@@ -429,16 +435,14 @@ class SafeBullets(PipelineEnv, ABC):
             (num_parts, num_bullets) array where > 0 means penetration depth,
             <= 0 means gap (negative = distance to surface).
         """
+        # No-bullet baseline: preserve a valid empty (num_parts, 0) matrix.
+        if self._num_bullets == 0:
+            return jp.zeros((self._part_link.shape[0], 0), dtype=jp.float32)
+
         # Bullet positions and radii - use helper method for proper JAX indexing
         all_bullet_pos, _ = self._get_bullet_pos_vel(pipeline_state)
         bullet_pos = all_bullet_pos[:self._num_bullets]
-        # Bullet radii are stored in geom_size of bullet geoms
-        mj_model = self.sys.mj_model
-        geom_id = lambda name: mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, name)
-        bullet_geom_ids = [geom_id(f'bullet{i}') for i in range(self._num_bullets)]
-        bullet_radii = jp.array([mj_model.geom_size[gid, 0] for gid in bullet_geom_ids])
-        # Ensure bullet_radii is 1D array
-        bullet_radii = jp.reshape(bullet_radii, (-1,))
+        bullet_radii = jp.full((self._num_bullets,), self._bullet_radius)
 
         # Body part positions, axes, radii, half-lengths
         rotate = jax.vmap(brax_math.rotate)
@@ -447,7 +451,7 @@ class SafeBullets(PipelineEnv, ABC):
         part_axis = rotate(self._part_axis, link_rot)
 
         # For each part and each bullet, compute penetration.
-        # Part is a sphere (half_length=0) or capsule (half_length>0); bullet is always a sphere.
+        # Capsules use segment distance; spheres and conservative box bounds use center distance.
         # Everything is already batched over parts, so plain broadcasting is used (no vmap).
         center = part_center[:, None, :]          # (num_parts, 1, 3)
         axis = part_axis[:, None, :]              # (num_parts, 1, 3)
@@ -514,7 +518,8 @@ class SafeBullets(PipelineEnv, ABC):
         fall_cost = self._fall_cost * (1.0 - self._is_healthy(pipeline_state))
 
         # Deepest overlap of any part with any bullet; negative = gap
-        max_penetration = jp.max(penetrations)
+        max_penetration = (jp.max(penetrations) if self._num_bullets > 0
+                           else jp.array(0.0, dtype=jp.float32))
         num_touching = jp.sum(penetrations > 0.0).astype(jp.float32)
 
         return {
@@ -527,20 +532,32 @@ class SafeBullets(PipelineEnv, ABC):
         }
 
     def _is_healthy(self, pipeline_state: base.State) -> jax.Array:
-        """1.0 while standing, 0.0 once fallen: torso out of healthy_z_range or off the platform."""
+        """Healthy unless torso height fails or a body part rests beyond the platform edge.
+
+        The floor is intentionally infinite for physics stability. Treat contact with
+        that floor outside the platform radius as a fall, while allowing the torso
+        to lean beyond the edge if no body part has reached the floor there.
+        """
         min_z, max_z = self._healthy_z_range
         torso_z = pipeline_state.x.pos[0, 2]
-        is_healthy = jp.where((torso_z < min_z) | (torso_z > max_z), 0.0, 1.0)
-        # Torso off the edge of the round platform counts as a fall
-        torso_radius = jp.linalg.norm(pipeline_state.x.pos[0, :2])
-        return jp.where(torso_radius > self._platform_radius, 0.0, is_healthy)
+        height_healthy = (torso_z >= min_z) & (torso_z <= max_z)
+
+        rotate = jax.vmap(brax_math.rotate)
+        link_rot = pipeline_state.x.rot[self._part_link]
+        part_center = pipeline_state.x.pos[self._part_link] + rotate(self._part_pos, link_rot)
+        part_axis = rotate(self._part_axis, link_rot)
+        vertical_extent = self._part_radius + self._part_half_length * jp.abs(part_axis[:, 2])
+        touching_floor = part_center[:, 2] - vertical_extent <= 0.055
+        outside_radius = jp.linalg.norm(part_center[:, :2], axis=1) > self._platform_radius
+        unsupported_contact = jp.any(touching_floor & outside_radius)
+        return (height_healthy & ~unsupported_contact).astype(jp.float32)
 
     # Metrics that are also copied into state.info each step.
-    _INFO_KEYS = ('cost', 'bullet_distance', 'bullet_violation', 'fall_cost', 'dodged_bullets')
+    _INFO_KEYS = ('cost', 'bullet_distance', 'bullet_violation', 'fall_cost')
 
     def _metrics(
             self, pipeline_state0: base.State, pipeline_state: base.State,
-            healthy_reward: jax.Array, height_reward: jax.Array, ctrl_cost: jax.Array,
+            healthy_reward: jax.Array, height_reward: jax.Array, upright_reward: jax.Array, ctrl_cost: jax.Array,
     ) -> dict:
         """All per-step metrics. The single source of the metric keys for step() and reset()."""
         # Center-of-mass position and velocity (logged only, not rewarded)
@@ -551,13 +568,13 @@ class SafeBullets(PipelineEnv, ABC):
             'reward_quadctrl': -ctrl_cost,
             'reward_alive': healthy_reward,
             'reward_height': height_reward,
+            'reward_upright': upright_reward,
             'x_position': com_after[0],
             'y_position': com_after[1],
             'distance_from_origin': jp.linalg.norm(com_after),
             'x_velocity': velocity[0],
             'y_velocity': velocity[1],
             **self._constraint_metrics(pipeline_state),
-            'dodged_bullets': jp.array(0.0, dtype=jp.float32),
         }
 
     def _get_obs(
@@ -647,7 +664,7 @@ class SafeBullets(PipelineEnv, ABC):
         )
 
         # Sample initial bullet conditions
-        bullet_positions, bullet_velocities, bullet_radii = self._sample_bullet_initial_conditions(rng3)
+        bullet_positions, bullet_velocities = self._sample_bullet_initial_conditions(rng3)
 
         # Set bullet positions and velocities in qpos/qvel using slide joints
         qpos, qvel = self._set_bullet_qpos_qvel(qpos, qvel, bullet_positions, bullet_velocities)
@@ -658,12 +675,10 @@ class SafeBullets(PipelineEnv, ABC):
 
         # Same keys as step() produces, all zero
         metrics = jax.tree_util.tree_map(
-            jp.zeros_like, self._metrics(pipeline_state, pipeline_state, zero, zero, zero))
+            jp.zeros_like, self._metrics(pipeline_state, pipeline_state, zero, zero, zero, zero))
         info = {k: metrics[k] for k in self._INFO_KEYS}
         info["step_count"] = 0
-        info["bullet_rng"] = rng4  # for bullet resets during episode
-        info["bullet_hit_flags"] = jp.zeros((self._num_bullets,), dtype=jp.bool_)
-        info["dodged_bullets"] = jp.array(0.0, dtype=jp.float32)
+        info["bullet_rng"] = rng4  # per-environment key for bullet respawns
 
         return State(pipeline_state, obs, reward, done, metrics, info)
 
@@ -678,36 +693,12 @@ class SafeBullets(PipelineEnv, ABC):
         pipeline_state0 = state.pipeline_state
         pipeline_state = self.pipeline_step(pipeline_state0, action)
 
-        # Track bullet hits until each bullet passes the humanoid and resets.
-        # This does not change bullet movement or reset behavior.
+        # Update bullets: constant velocity, reset when past humanoid
         step_count = state.info.get("step_count", 0)
-        previous_hit_flags = state.info.get(
-            "bullet_hit_flags", jp.zeros((self._num_bullets,), dtype=jp.bool_))
-        previous_bullet_pos, previous_bullet_vel = self._get_bullet_pos_vel(pipeline_state0)
-        next_bullet_pos = (
-            previous_bullet_pos[:self._num_bullets]
-            + previous_bullet_vel[:self._num_bullets] * self.dt
-        )
-        bullets_resetting = next_bullet_pos[:, 0] < self._bullet_reset_x
-        hit_this_step = jp.any(self._bullet_overlaps(pipeline_state) > 0.0, axis=0)
-        dodged_this_step = jp.sum(
-            bullets_resetting & ~(previous_hit_flags | hit_this_step)
-        ).astype(jp.int32)
-        dodged_bullets = state.info.get(
-            "dodged_bullets", jp.array(0.0, dtype=jp.float32)
-        )
-        dodged_bullets = dodged_bullets + dodged_this_step.astype(jp.float32)
-        bullet_hit_flags = jp.where(
-            bullets_resetting,
-            jp.zeros((self._num_bullets,), dtype=jp.bool_),
-            previous_hit_flags | hit_this_step,
-        )
-
-        pipeline_state = self._update_bullets(pipeline_state0, pipeline_state, step_count)
+        bullet_rng = state.info.get("bullet_rng", jax.random.PRNGKey(0))
+        pipeline_state, bullet_rng = self._update_bullets(pipeline_state0, pipeline_state, bullet_rng)
 
         new_info = dict(state.info)
-        new_info["bullet_hit_flags"] = bullet_hit_flags
-        new_info["dodged_bullets"] = dodged_bullets
 
         # Healthy reward
         min_z, _ = self._healthy_z_range
@@ -721,6 +712,8 @@ class SafeBullets(PipelineEnv, ABC):
         # full weight when the torso is as high as at spawn (standing upright)
         standing = (pipeline_state.x.pos[0, 2] - min_z) / (self.default_spawn_height - min_z)
         height_reward = self._height_reward_weight * jp.clip(standing, 0.0, 1.0)
+        torso_up = brax_math.rotate(jp.array([0.0, 0.0, 1.0]), pipeline_state.x.rot[0])
+        upright_reward = self._upright_reward_weight * jp.clip(torso_up[2], 0.0, 1.0)
 
         # Control cost
         ctrl_cost = self._ctrl_cost_weight * jp.sum(jp.square(action))
@@ -728,19 +721,18 @@ class SafeBullets(PipelineEnv, ABC):
         obs = self._get_obs(pipeline_state, action)
 
         # Reward structure
-        reward = healthy_reward + height_reward - ctrl_cost
+        reward = healthy_reward + height_reward + upright_reward - ctrl_cost
         done = 1.0 - is_healthy if self._terminate_when_unhealthy else 0.0
 
         # Update metrics
         metrics = self._metrics(
-            pipeline_state0, pipeline_state, healthy_reward, height_reward, ctrl_cost)
-        metrics["dodged_bullets"] = dodged_this_step.astype(jp.float32)
+            pipeline_state0, pipeline_state, healthy_reward, height_reward, upright_reward, ctrl_cost)
         state.metrics.update(metrics)
 
         # Update info dictionary with cost
         new_info.update({k: metrics[k] for k in self._INFO_KEYS})
-        new_info["dodged_bullets"] = dodged_bullets
         new_info["step_count"] = step_count + 1
+        new_info["bullet_rng"] = bullet_rng
 
         return state.replace(
             pipeline_state=pipeline_state, obs=obs, reward=reward, done=done, info=new_info
