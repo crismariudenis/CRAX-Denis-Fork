@@ -13,6 +13,7 @@ Usage:
     python scripts/dodge_policy_videos.py --stage 1 --levels 1  # stage 1's policy instead of the last
     python scripts/dodge_policy_videos.py --runs_dir models/<folder>   # every run in a folder (e.g. all seeds)
     python scripts/dodge_policy_videos.py --env_kwargs '{"plane_height_range": [1.0, 1.5]}' --tag low
+    python scripts/dodge_policy_videos.py --env_name safe_bullet_dodge_humanoid --levels 4 --fps 20  # slow motion
 """
 import argparse
 import json
@@ -37,17 +38,21 @@ from crax import envs
 from training.agents.ppo import checkpoint as ppo_checkpoint
 
 ENV_NAME = "safe_dodge_humanoid"
+# Video name prefix per env
+ENV_PREFIXES = {"safe_dodge_humanoid": "sd", "safe_bullet_dodge_humanoid": "sbd"}
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--env_name", type=str, default=ENV_NAME, choices=sorted(ENV_PREFIXES),
+                   help="The env the policy was trained on")
     p.add_argument("--run", type=str, default=None,
-                   help="Training run folder under models/ (default: the newest "
-                        f"{ENV_NAME}_curriculum_* run)")
+                   help="Training run folder under models/, or a models/dodge_* folder holding one "
+                        f"(default: the newest {ENV_NAME}_curriculum_* run)")
     p.add_argument("--runs_dir", type=str, default=None,
                    help=f"Record every {ENV_NAME}_curriculum_* run in this folder instead (e.g. one per seed)")
-    p.add_argument("--levels", type=int, nargs="+", default=[3], choices=[1, 2, 3],
+    p.add_argument("--levels", type=int, nargs="+", default=[3], choices=[1, 2, 3, 4],
                    help="Levels to record the policy on, one set of videos each")
     p.add_argument("--stage", type=int, default=None,
                    help="Curriculum stage whose policy to record (default: the last stage)")
@@ -65,15 +70,17 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def find_runs(run: str | None, runs_dir: str | None) -> list[Path]:
+def find_runs(run: str | None, runs_dir: str | None, env_name: str = ENV_NAME) -> list[Path]:
     """The run folders: the given one, every run in runs_dir, or the newest dodge curriculum run."""
     if run is not None:
         path = Path(run)
-        return [path if path.is_absolute() or path.exists() else REPO_ROOT / "models" / run]
+        path = path if path.is_absolute() or path.exists() else REPO_ROOT / "models" / run
+        # A folder the dodge scripts made (models/dodge_*) holds the run one level down
+        return sorted(path.glob(f"{env_name}_curriculum_*"), key=lambda p: p.stat().st_mtime) or [path]
     search_dir = Path(runs_dir) if runs_dir is not None else REPO_ROOT / "models"
-    runs = sorted(search_dir.glob(f"{ENV_NAME}_curriculum_*"), key=lambda p: p.stat().st_mtime)
+    runs = sorted(search_dir.glob(f"{env_name}_curriculum_*"), key=lambda p: p.stat().st_mtime)
     if not runs:
-        raise FileNotFoundError(f"No {ENV_NAME}_curriculum_* run in {search_dir}; pass --run.")
+        raise FileNotFoundError(f"No {env_name}_curriculum_* run in {search_dir}; pass --run.")
     return runs if runs_dir is not None else runs[-1:]
 
 
@@ -97,18 +104,22 @@ def latest_checkpoint(run_dir: Path, stage: int | None) -> Path:
     return steps[-1]
 
 
-def overlay_metrics(frames, returns, costs):
-    """Draws the running return and cost onto each frame."""
+def overlay_metrics(frames, returns, costs, bullet_counts=None):
+    """Draws the running return and cost onto each frame, and with bullet_counts ((hit, dodged) per
+    frame) the bullets that hit and the ones dodged so far."""
     try:
         font = ImageFont.truetype("DejaVuSans-Bold.ttf", 20)
     except (OSError, IOError):
         font = ImageFont.load_default()
     annotated = []
-    for frame, ret, cost in zip(frames, returns, costs):
+    for t, (frame, ret, cost) in enumerate(zip(frames, returns, costs)):
         img = Image.fromarray(np.asarray(frame, dtype=np.uint8))
         draw = ImageDraw.Draw(img)
-        for i, (text, color) in enumerate([(f"Return: {ret:.2f}", (50, 220, 50)),
-                                           (f"Cost: {cost:.2f}", (230, 60, 60))]):
+        lines = [(f"Return: {ret:.2f}", (50, 220, 50)), (f"Cost: {cost:.2f}", (230, 60, 60))]
+        if bullet_counts is not None:
+            hit, dodged = bullet_counts[t]
+            lines += [(f"Hit: {hit}", (240, 150, 40)), (f"Dodged: {dodged}", (80, 180, 255))]
+        for i, (text, color) in enumerate(lines):
             draw.text((10, 10 + 30 * i), text, font=font, fill=color,
                       stroke_width=2, stroke_fill=(0, 0, 0))
         annotated.append(np.array(img))
@@ -117,7 +128,7 @@ def overlay_metrics(frames, returns, costs):
 
 def record_level(policy, level: int, args, out_prefix: str) -> None:
     """Plays the policy on one level for --steps and saves one video per camera."""
-    env = envs.get_environment(ENV_NAME, level=level, **json.loads(args.env_kwargs))
+    env = envs.get_environment(args.env_name, level=level, **json.loads(args.env_kwargs))
     reset_fn, step_fn = jax.jit(env.reset), jax.jit(env.step)
 
     # Lowest point of every body part's hitbox; below 0 = sunk into the floor
@@ -135,6 +146,10 @@ def record_level(policy, level: int, args, out_prefix: str) -> None:
     total_reward, total_cost, falls = 0.0, 0.0, 0
     returns, costs = [total_reward], [total_cost]
     lowest = np.asarray(part_bottoms(state.pipeline_state))
+    # Bullet envs: shots and hits this episode; dodged = gone without hitting = fired - hit - in flight
+    has_bullets = hasattr(state.pipeline_state, "bullets")
+    fired, hit, all_fired, all_hit = 0, 0, 0, 0
+    bullet_counts = [(0, 0)] if has_bullets else None
 
     for _ in range(args.steps):
         rng, act_rng = jax.random.split(rng)
@@ -146,20 +161,31 @@ def record_level(policy, level: int, args, out_prefix: str) -> None:
         total_cost += float(state.info["cost"])
         returns.append(total_reward)
         costs.append(total_cost)
+        if has_bullets:
+            b = state.pipeline_state.bullets
+            fired += int(np.sum(b.fired))
+            hit += int(np.sum(b.hit))
+            bullet_counts.append((hit, fired - hit - int(np.sum(b.active))))
         if bool(state.done):
             # Keep recording: start a new episode, totals restart from 0
             falls += 1
             rng, reset_rng = jax.random.split(rng)
             state = reset_fn(reset_rng)
             total_reward, total_cost = 0.0, 0.0
+            if has_bullets:
+                all_fired, all_hit = all_fired + fired, all_hit + hit
+                fired, hit = 0, 0
 
     print(f"level {level}: {args.steps} steps, {falls} falls")
+    if has_bullets:
+        all_fired, all_hit = all_fired + fired, all_hit + hit
+        print(f"  bullets: {all_fired} fired, {all_hit} hit ({100 * all_hit / max(all_fired, 1):.1f}%)")
     sunk = [(depth, name) for depth, name in sorted(zip(lowest, dodge._part_names)) if depth < 0.0]
     print("  deepest into the floor: " + (", ".join(f"{name} {-depth * 1000:.1f} mm" for depth, name in sunk)
                                           if sunk else "nothing"))
     for camera in args.cameras:
         frames = env.render(trajectory, height=args.height, width=args.width, camera=camera)
-        frames = overlay_metrics(frames, returns, costs)
+        frames = overlay_metrics(frames, returns, costs, bullet_counts)
         out_path = REPO_ROOT / "videos" / f"{out_prefix}_lvl{level}_{camera}.mp4"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         iio.imwrite(out_path, np.stack(frames).astype(np.uint8), fps=args.fps)
@@ -168,12 +194,13 @@ def record_level(policy, level: int, args, out_prefix: str) -> None:
 
 def main() -> None:
     args = parse_args()
-    for run_dir in find_runs(args.run, args.runs_dir):
+    for run_dir in find_runs(args.run, args.runs_dir, args.env_name):
         ckpt = latest_checkpoint(run_dir, args.stage)
         print(f"policy: {ckpt}")
         policy = jax.jit(ppo_checkpoint.load_policy(ckpt, deterministic=True))
-        # Short name: sd (safe dodge) + a 4-character id of the run, the same every time for one run
-        out_prefix = f"sd_{zlib.crc32(run_dir.name.encode()) & 0xFFFF:04x}"
+        # Short name: sd (safe dodge) or sbd (bullet dodge) + a 4-character id of the run, the same every
+        # time for one run
+        out_prefix = f"{ENV_PREFIXES[args.env_name]}_{zlib.crc32(run_dir.name.encode()) & 0xFFFF:04x}"
         if args.stage is not None:
             out_prefix += f"_stage{args.stage}"
         if args.tag:

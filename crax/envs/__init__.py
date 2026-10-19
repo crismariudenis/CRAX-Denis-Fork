@@ -53,6 +53,7 @@ from crax.envs.safe_circle import SafeCircle, SafeCirclePoint
 from crax.envs.safe_goal import SafeGoal, SafeGoalPoint
 from crax.envs.safe_height import SafeHeight, SafeHeightHumanoid
 from crax.envs.safe_dodge import SafeDodge, SafeDodgeHumanoid
+from crax.envs.safe_bullet_dodge import SafeBulletDodge, SafeBulletDodgeHumanoid
 from crax.envs.safe_lift import SafeLift, SafeLiftHumanoid
 from crax.envs.safe_pathway import SafePathway, SafePathwayWalker2D
 from crax.envs.safe_push import SafePush, SafePushPoint
@@ -89,6 +90,7 @@ _envs = {
     'safe_goal_point': SafeGoalPoint,
     'safe_height_humanoid': SafeHeightHumanoid,
     'safe_dodge_humanoid': SafeDodgeHumanoid,
+    'safe_bullet_dodge_humanoid': SafeBulletDodgeHumanoid,
     'safe_lift_ant': SafeLiftAnt,
     'safe_lift_humanoid': SafeLiftHumanoid,
     'safe_lift_spider': SafeLiftSpider,

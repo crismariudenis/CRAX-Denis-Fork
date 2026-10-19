@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--env_name", type=str, default="safe_height_humanoid",
                    help="Environment name from the CRAX registry")
     p.add_argument("--level", type=int, default=1, choices=[1, 2, 3, 4],
-                   help="Difficulty level (4 only for safe_dodge_humanoid)")
+                   help="Difficulty level (4 only for safe_dodge_humanoid and safe_bullet_dodge_humanoid)")
     p.add_argument("--env_kwargs", type=str, default="{}",
                    help="JSON dict of extra env constructor kwargs (see docs/PARAMETERS.md)")
     p.add_argument("--physics", choices=["env", "mujoco"], default="env",
@@ -160,9 +160,10 @@ def run_viewer(args) -> None:
     from crax import envs
 
     env = envs.get_environment(args.env_name, level=args.level, **json.loads(args.env_kwargs))
-    # The dodge envs keep their hazard plane out of the physics; their render model has it as a mocap body
+    # The dodge envs keep their hazard (plane or bullets) out of the physics; their render model has it as
+    # mocap bodies, which the env places itself
     model = getattr(env, "_render_model", env.sys.mj_model)
-    plane_mocap = getattr(env, "_plane_mocap", None)
+    set_render_hazard = getattr(env, "_set_render_hazard", None)
     data = mujoco.MjData(model)
     dt = float(env.dt)
     episode_length = getattr(env, "episode_length", 1000)
@@ -178,9 +179,8 @@ def run_viewer(args) -> None:
     def show(state):
         data.qpos[:] = np.asarray(state.pipeline_state.q)
         data.qvel[:] = np.asarray(state.pipeline_state.qd)
-        if plane_mocap is not None:
-            data.mocap_pos[plane_mocap] = np.asarray(state.pipeline_state.plane.pos)
-            data.mocap_quat[plane_mocap] = np.asarray(state.pipeline_state.plane.rot)
+        if set_render_hazard is not None:
+            set_render_hazard(data, state.pipeline_state)
         mujoco.mj_forward(model, data)
 
     def sample_action():
@@ -209,6 +209,9 @@ def run_viewer(args) -> None:
     with mujoco.viewer.launch_passive(model, data) as viewer:
         load_camera(viewer, args._cam_file)
         steps, ret, cost = 0, 0.0, 0.0
+        # Bullet envs: shots and hits this episode; dodged = gone without hitting = fired - hit - in flight
+        has_bullets = hasattr(state.pipeline_state, "bullets")
+        fired, hit, flying = 0, 0, 0
         last_cam_save = 0.0
         while viewer.is_running():
             tick = time.time()
@@ -219,6 +222,10 @@ def run_viewer(args) -> None:
                     ret += float(state.reward)
                     cost += float(state.info.get("cost", 0.0))
                     done = bool(state.done)
+                    if has_bullets:
+                        b = state.pipeline_state.bullets
+                        fired, hit = fired + int(np.sum(b.fired)), hit + int(np.sum(b.hit))
+                        flying = int(np.sum(b.active))
                     show(state)
                 else:
                     limited = model.actuator_ctrllimited.astype(bool)
@@ -227,11 +234,16 @@ def run_viewer(args) -> None:
                     done = False
                 steps += 1
                 if done or steps >= episode_length:
-                    print(f"[live_view] episode end: steps={steps} return={ret:.2f} cost={cost:.2f}")
+                    bullet_text = f" hit={hit} fired={fired}" if has_bullets else ""
+                    print(f"[live_view] episode end: steps={steps} return={ret:.2f} cost={cost:.2f}{bullet_text}")
                     state = reset()
                     steps, ret, cost = 0, 0.0, 0.0
+                    fired, hit, flying = 0, 0, 0
             if step_fn is not None:
-                viewer.set_texts((None, None, f"step {steps}\nreturn {ret:.2f}\ncost {cost:.2f}", None))
+                text = f"step {steps}\nreturn {ret:.2f}\ncost {cost:.2f}"
+                if has_bullets:
+                    text += f"\nhit {hit}\ndodged {fired - hit - flying}"
+                viewer.set_texts((None, None, text, None))
             viewer.sync()
             if tick - last_cam_save > 1.0:
                 save_camera(viewer, args._cam_file)

@@ -23,6 +23,10 @@ PYTHON=python
 [ -x .venv/bin/python ] && PYTHON=.venv/bin/python
 
 ALG=ppo_pid
+# ENV_NAME=safe_bullet_dodge_humanoid for bullets (its cost is 1 per hit, so SAFETY_BOUND is hits per episode)
+ENV_NAME=${ENV_NAME:-safe_dodge_humanoid}
+RUN_PREFIX=dodge
+[ "$ENV_NAME" = safe_bullet_dodge_humanoid ] && RUN_PREFIX=bullet_dodge
 # Max Lagrange multiplier. The loss is adv - lambda * cost_adv, each normalized to std 1, so lambda is how much
 # more the cost counts than the reward. At 10, with planes down to 0.9 m and limit 5, it sat at the cap and
 # stood tall taking hits (plane cost ~19). Higher pushes harder, but the reward (standing back up) counts less:
@@ -42,7 +46,7 @@ NUM_MINIBATCHES=32
 SEEDS="69"
 VIDEO_STEPS=1000          # 15 s
 FPS=60
-MODEL_DIR=models/dodge_nocurr_$(date +%Y%m%d_%H%M%S)
+MODEL_DIR=models/${RUN_PREFIX}_nocurr_$(date +%Y%m%d_%H%M%S)
 # Brax's humanoid PPO settings, the ones level 1 learned to stand with.
 # 20 evals = one every 4M steps, as often as the 1.5e8 run's 40.
 PPO_ARGS="--learning_rate 3e-4 --entropy_cost 1e-3 --discounting 0.97 --unroll_length 10
@@ -50,12 +54,12 @@ PPO_ARGS="--learning_rate 3e-4 --entropy_cost 1e-3 --discounting 0.97 --unroll_l
 
 # 1. Training: a one-level curriculum, so the run folder and checkpoints look like dodge_videos.sh's
 #    and dodge_policy_videos.py finds them unchanged
-$PYTHON -m training.train_curriculum --env_name safe_dodge_humanoid --alg $ALG --levels $LEVEL \
+$PYTHON -m training.train_curriculum --env_name $ENV_NAME --alg $ALG --levels $LEVEL \
     --pid_lambda_clip $LAMBDA_CLIP --safety_bound $SAFETY_BOUND \
     --level_steps $STEPS --num_envs $NUM_ENVS --batch_size $BATCH_SIZE \
     --num_minibatches $NUM_MINIBATCHES --seeds $SEEDS --model_dir $MODEL_DIR \
     --use_wandb false --skip_video $PPO_ARGS
 
 # 2. Videos on level 3 (the policy never saw levels 1-2: it falls there)
-$PYTHON scripts/dodge_policy_videos.py --runs_dir $MODEL_DIR --levels $LEVEL \
+$PYTHON scripts/dodge_policy_videos.py --env_name $ENV_NAME --runs_dir $MODEL_DIR --levels $LEVEL \
     --steps $VIDEO_STEPS --fps $FPS --cameras front side orbit

@@ -244,7 +244,7 @@ class SafeDodge(PipelineEnv, ABC):
         xml_string = xml_string.replace('PLANE_GROUP', '2' if plane_enabled else '3')
 
         # Renders use the full XML (the plane is a mocap body there); the physics leaves the plane out
-        self._render_model = mujoco.MjModel.from_xml_string(xml_string)
+        self._render_model = mujoco.MjModel.from_xml_string(self._render_xml(xml_string))
         self._plane_mocap = int(self._render_model.body_mocapid[
             mujoco.mj_name2id(self._render_model, mujoco.mjtObj.mjOBJ_BODY, 'hazard_plane')])
         xml = ElementTree.fromstring(xml_string)
@@ -303,19 +303,8 @@ class SafeDodge(PipelineEnv, ABC):
 
         # Store previous state for velocity calculation
         pipeline_state0 = state.pipeline_state
-        plane = pipeline_state0.plane
-        pos = plane.pos + plane.vel * self.dt
-        # A dropping plane stops at its height
-        arrived = pos[2] <= plane.stop_z
-        plane = plane.replace(pos=pos.at[2].max(plane.stop_z),
-                              vel=jp.where(arrived, plane.vel.at[2].set(0.0), plane.vel))
-        new_info = dict(state.info)
-        if self._plane_slide_speed > 0.0 and self._plane_resample_interval == 0:
-            plane, new_info["plane_rng"] = self._next_pass(plane, state.info["plane_rng"])
-        if self._plane_resample_interval > 0:
-            plane, new_info["plane_rng"], new_info["plane_timer"] = self._next_plane(
-                plane, state.info["plane_rng"], state.info["plane_timer"])
-        pipeline_state = self.pipeline_step(pipeline_state0, action).replace(plane=plane)
+        pipeline_state, new_info = self._step_hazard(
+            pipeline_state0, self.pipeline_step(pipeline_state0, action), state.info)
 
         # Healthy reward
         min_z, _ = self._healthy_z_range
@@ -337,7 +326,7 @@ class SafeDodge(PipelineEnv, ABC):
         torso_up = brax_math.rotate(jp.array([0.0, 0.0, 1.0]), pipeline_state.x.rot[0])[2]
         upright = jp.clip(torso_up, 0.0, 1.0)
         if self._upright_free_distance > 0.0:
-            upright = jp.where(self._plane_torso_distance(pipeline_state) < self._upright_free_distance,
+            upright = jp.where(self._hazard_torso_distance(pipeline_state) < self._upright_free_distance,
                                1.0, upright)
         upright_reward = self._upright_reward_weight * upright
 
@@ -387,10 +376,8 @@ class SafeDodge(PipelineEnv, ABC):
             rng2, (self.sys.qd_size(),), minval=low, maxval=hi
         )
 
-        # Random plane for this episode
         physics = self.pipeline_init(qpos, qvel)
-        pipeline_state = DodgeState(**{f.name: getattr(physics, f.name) for f in dataclasses.fields(physics)},
-                                    plane=self._sample_plane(rng3))
+        pipeline_state, hazard_info = self._init_hazard(physics, rng3, rng4)
         obs = self._get_obs(pipeline_state, jp.zeros(self.sys.act_size()))
         reward, done, zero = jp.zeros(3)
 
@@ -398,9 +385,50 @@ class SafeDodge(PipelineEnv, ABC):
                                      'reward_quadctrl')}
         metrics = jax.tree_util.tree_map(
             jp.zeros_like, self._metrics(pipeline_state, pipeline_state, rewards))
-        info = {"cost": metrics["cost"], "plane_rng": rng4, "plane_timer": jp.zeros((), jp.int32)}
+        info = {"cost": metrics["cost"], **hazard_info}
 
         return State(pipeline_state, obs, reward, done, metrics, info)
+
+    # ------------------------------------------------------------------------
+    # Hazard hooks: what a subclass with another hazard (e.g. SafeBulletDodge) replaces
+    # ------------------------------------------------------------------------
+
+    def _render_xml(self, xml_string: str) -> str:
+        """The render model's XML: the physics XML plus render-only bodies. The plane is already in it."""
+        return xml_string
+
+    def _init_hazard(self, physics: base.State, rng: jax.Array, stream_rng: jax.Array) -> Tuple[base.State, dict]:
+        """The pipeline state with the episode's first hazard, and the info entries the hazard keeps.
+
+        rng draws the first hazard; stream_rng is kept in the info for the later ones.
+        """
+        pipeline_state = DodgeState(**{f.name: getattr(physics, f.name) for f in dataclasses.fields(physics)},
+                                    plane=self._sample_plane(rng))
+        return pipeline_state, {"plane_rng": stream_rng, "plane_timer": jp.zeros((), jp.int32)}
+
+    def _step_hazard(
+            self, pipeline_state0: DodgeState, pipeline_state: DodgeState, info: dict,
+    ) -> Tuple[DodgeState, dict]:
+        """Moves the hazard one step. pipeline_state is the physics after the step, still with the old hazard;
+        returns it with the new hazard, and the new info."""
+        plane = pipeline_state0.plane
+        pos = plane.pos + plane.vel * self.dt
+        # A dropping plane stops at its height
+        arrived = pos[2] <= plane.stop_z
+        plane = plane.replace(pos=pos.at[2].max(plane.stop_z),
+                              vel=jp.where(arrived, plane.vel.at[2].set(0.0), plane.vel))
+        new_info = dict(info)
+        if self._plane_slide_speed > 0.0 and self._plane_resample_interval == 0:
+            plane, new_info["plane_rng"] = self._next_pass(plane, info["plane_rng"])
+        if self._plane_resample_interval > 0:
+            plane, new_info["plane_rng"], new_info["plane_timer"] = self._next_plane(
+                plane, info["plane_rng"], info["plane_timer"])
+        return pipeline_state.replace(plane=plane), new_info
+
+    def _set_render_hazard(self, data: mujoco.MjData, pipeline_state: DodgeState) -> None:
+        """Moves the render model's hazard bodies (mocap) to where the hazard is."""
+        data.mocap_pos[self._plane_mocap] = np.asarray(pipeline_state.plane.pos)
+        data.mocap_quat[self._plane_mocap] = np.asarray(pipeline_state.plane.rot)
 
     def _sample_plane(self, rng: jax.Array) -> Plane:
         """The plane at the start of a new pass: random tilt, height, position and slide."""
@@ -520,8 +548,7 @@ class SafeDodge(PipelineEnv, ABC):
 
         def get_image(i: int, state: base.State) -> np.ndarray:
             d.qpos, d.qvel = state.q, state.qd
-            d.mocap_pos[self._plane_mocap] = state.plane.pos
-            d.mocap_quat[self._plane_mocap] = state.plane.rot
+            self._set_render_hazard(d, state)
             mujoco.mj_forward(mj_model, d)
             if orbit:
                 cam.azimuth = self._ORBIT_SPEED * i * self.dt
@@ -549,7 +576,7 @@ class SafeDodge(PipelineEnv, ABC):
                                jp.abs(offset @ side_v) - reach(side_v)) - self._plane_half_size
         return jp.where(past_edge > 0.0, jp.minimum(depth, -past_edge), depth)
 
-    def _plane_torso_distance(self, pipeline_state: DodgeState) -> jax.Array:
+    def _hazard_torso_distance(self, pipeline_state: DodgeState) -> jax.Array:
         """Distance (m) from the torso's centre to the nearest point of the plane."""
         plane = pipeline_state.plane
         side_u, side_v, normal = plane.axes()
@@ -629,11 +656,11 @@ class SafeDodge(PipelineEnv, ABC):
             com_inertia.ravel(),
             com_velocity.ravel(),
             qfrc_actuator,
-            self._plane_obs(pipeline_state),
+            self._hazard_obs(pipeline_state),
             self._platform_obs(pipeline_state),
         ])
 
-    def _plane_obs(self, pipeline_state: DodgeState) -> jax.Array:
+    def _hazard_obs(self, pipeline_state: DodgeState) -> jax.Array:
         """Plane offset, normal (toward the torso), distance and velocity, relative to the torso."""
         plane = pipeline_state.plane
         normal = plane.axes()[2]
