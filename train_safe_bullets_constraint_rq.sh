@@ -6,7 +6,7 @@
 #SBATCH --gpus=1
 #SBATCH --partition=gpu_a100
 #SBATCH --time=24:00:00
-#SBATCH --array=0-24
+#SBATCH --array=0,10
 #SBATCH --output=logs/rq/%x_%A_%a.out
 #SBATCH --error=logs/rq/%x_%A_%a.err
 
