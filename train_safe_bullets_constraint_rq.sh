@@ -102,3 +102,4 @@ python -m training.train_env \
     --model_dir "$MODEL_DIR" \
     --store_model
 
+echo "Training curriculum and reward engineering complete"
