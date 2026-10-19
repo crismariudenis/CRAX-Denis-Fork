@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=18
 #SBATCH --gpus=1
 #SBATCH --partition=gpu_a100
-#SBATCH --time=24:00:00
+#SBATCH --time=12:00:00
 #SBATCH --array=0,10
 #SBATCH --output=logs/rq/%x_%A_%a.out
 #SBATCH --error=logs/rq/%x_%A_%a.err
@@ -51,9 +51,9 @@ DIFFICULTY=3                                  # final level: 6 bullets
 NUM_SEEDS=5
 CONDITIONS=(b1_pid b2_cw1 b2_cw10 b2_cw100 b2_cw1000)
 
-NUM_TIMESTEPS=${NUM_TIMESTEPS:-100000000}
-NUM_ENVS=${NUM_ENVS:-2048}
-NUM_EVALS=${NUM_EVALS:-30}
+NUM_TIMESTEPS=${NUM_TIMESTEPS:-500000}
+NUM_ENVS=${NUM_ENVS:-256}
+NUM_EVALS=${NUM_EVALS:-10}
 NUM_EVAL_ENVS=${NUM_EVAL_ENVS:-128}
 EPISODE_LENGTH=${EPISODE_LENGTH:-1000}
 NUM_MINIBATCHES=${NUM_MINIBATCHES:-32}
@@ -65,21 +65,27 @@ ENTROPY_COST=0.01
 LEARNING_RATE=3e-4
 SAFETY_BOUND=${SAFETY_BOUND:-0.1}             # episodic cost budget d (per-step bound = d / episode length)
 PID_LAMBDA_CLIP=10
-
+ 
 TASK=${SLURM_ARRAY_TASK_ID:?"run via sbatch --array or set SLURM_ARRAY_TASK_ID"}
 COND=${CONDITIONS[$((TASK / NUM_SEEDS))]}
 SEED=$((TASK % NUM_SEEDS))
 [ -n "$COND" ] || { echo "array task $TASK is out of range"; exit 1; }
-
+ 
 case "$COND" in
     b1_pid)  ALG_ARGS=(--alg ppo_pid --safety_bound "$SAFETY_BOUND" --pid_lambda_clip "$PID_LAMBDA_CLIP") ;;
     b2_cw*)  ALG_ARGS=(--alg ppo_cost --cost-weight "${COND#b2_cw}") ;;
 esac
-
+ 
 # runs_root for scripts/rq_analyze.py is models/rq (<condition>/seed<k>)
 MODEL_DIR="models/rq/$COND/seed$SEED"
-
-
+ 
+echo "=========================================="
+echo "RQ2 run: $COND  seed $SEED  (array task $TASK)"
+echo "Environment: $ENV_NAME  difficulty $DIFFICULTY (final level only, no curriculum)"
+echo "Timesteps: $NUM_TIMESTEPS   envs: $NUM_ENVS   safety bound: $SAFETY_BOUND"
+echo "Model directory: $MODEL_DIR"
+echo "=========================================="
+ 
 python -m training.train_env \
     --env_name "$ENV_NAME" \
     "${ALG_ARGS[@]}" \
@@ -101,5 +107,5 @@ python -m training.train_env \
     --skip_video --skip_rollout \
     --model_dir "$MODEL_DIR" \
     --store_model
-
-echo "Training curriculum and reward engineering complete"
+ 
+echo "Done: $COND seed $SEED"
