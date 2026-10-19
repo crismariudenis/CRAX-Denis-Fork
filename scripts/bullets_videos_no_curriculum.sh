@@ -1,4 +1,3 @@
-
 #!/usr/bin/env bash
 # SafeBulletsHumanoid: train directly on level 3 (no curriculum).
 # Generates videos after training completes.

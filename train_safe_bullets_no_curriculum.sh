@@ -1,4 +1,3 @@
-
 #!/bin/bash
 #SBATCH --job-name=bullets_nocurr
 #SBATCH --nodes=1
