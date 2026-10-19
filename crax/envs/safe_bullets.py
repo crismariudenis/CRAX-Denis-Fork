@@ -678,6 +678,8 @@ class SafeBullets(PipelineEnv, ABC):
             jp.zeros_like, self._metrics(pipeline_state, pipeline_state, zero, zero, zero, zero))
         info = {k: metrics[k] for k in self._INFO_KEYS}
         info["step_count"] = 0
+        info["dodged_bullets"] = jp.array(0, dtype=jp.int32)
+        info["bullet_hit_flags"] = jp.zeros((6,), dtype=jp.bool_)
         info["bullet_rng"] = rng4  # per-environment key for bullet respawns
 
         return State(pipeline_state, obs, reward, done, metrics, info)
@@ -694,11 +696,64 @@ class SafeBullets(PipelineEnv, ABC):
         pipeline_state = self.pipeline_step(pipeline_state0, action)
 
         # Update bullets: constant velocity, reset when past humanoid
-        step_count = state.info.get("step_count", 0)
+        # Track bullet hits before updating/resupplying bullets.
         bullet_rng = state.info.get("bullet_rng", jax.random.PRNGKey(0))
-        pipeline_state, bullet_rng = self._update_bullets(pipeline_state0, pipeline_state, bullet_rng)
+        step_count = state.info.get("step_count", 0)
+
+        old_hit_flags = state.info.get(
+            "bullet_hit_flags", jp.zeros((6,), dtype=jp.bool_)
+        )
+        dodged_bullets = state.info.get(
+            "dodged_bullets", jp.array(0, dtype=jp.int32)
+        )
+
+        if self._num_bullets > 0:
+            # Mark bullets that overlap any body part during this step.
+            penetrations = self._bullet_overlaps(pipeline_state)
+            hit_this_step = jp.any(penetrations > 0.0, axis=0)
+
+            # Pad to six bullets because the state tracks all six slots.
+            hit_this_step = jp.pad(
+                hit_this_step,
+                (0, 6 - self._num_bullets),
+                constant_values=False,
+            )
+
+            hit_flags = old_hit_flags | hit_this_step
+
+            # Identify bullets that pass the reset boundary this step.
+            bullet_pos, bullet_vel = self._get_bullet_pos_vel(pipeline_state0)
+            predicted_pos = bullet_pos + bullet_vel * self.dt
+            needs_reset = (
+                predicted_pos[:self._num_bullets, 0] < self._bullet_reset_x
+            )
+
+            # Count only bullets that passed without a recorded hit.
+            dodged_now = jp.sum(
+                needs_reset & ~hit_flags[:self._num_bullets]
+            ).astype(jp.int32)
+
+            dodged_bullets = dodged_bullets + dodged_now
+
+            # A respawned bullet begins a new attempt.
+            hit_flags = hit_flags.at[:self._num_bullets].set(
+                jp.where(
+                    needs_reset,
+                    False,
+                    hit_flags[:self._num_bullets],
+                )
+            )
+        else:
+            hit_flags = old_hit_flags
+
+        # Move and respawn bullets.
+        pipeline_state, bullet_rng = self._update_bullets(
+            pipeline_state0, pipeline_state, bullet_rng
+        )
 
         new_info = dict(state.info)
+        new_info["dodged_bullets"] = dodged_bullets
+        new_info["bullet_hit_flags"] = hit_flags
 
         # Healthy reward
         min_z, _ = self._healthy_z_range
