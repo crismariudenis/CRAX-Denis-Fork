@@ -12,7 +12,7 @@ the render model shows them as mocap bodies with a fading trail.
 
 import dataclasses
 import math
-from typing import Tuple
+from typing import Optional, Tuple
 from xml.etree import ElementTree
 
 import jax
@@ -60,7 +60,9 @@ class SafeBulletDodge(SafeDodge):
     appears bullet_warning_range seconds before it reaches the torso, aimed where
     the torso will be by then if it keeps its velocity (bullet_lead), so moving
     all the time doesn't dodge anything; only reacting to a bullet does. Its
-    height and sideways miss are normal around the body.
+    height and sideways miss are normal around the body or, with
+    bullet_aim_parts, around a random body part where it is at the shot, so no
+    posture held in advance (bowing, kneeling) dodges anything either.
     """
 
     # Where idle bullets wait in renders: below the floor
@@ -91,6 +93,7 @@ class SafeBulletDodge(SafeDodge):
             bullet_height_range: Tuple[float, float] = (0.3, 1.7),
             bullet_aim_std: float = 0.15,
             bullet_aim_offset: float = 0.3,
+            bullet_aim_parts: Optional[Tuple[str, ...]] = None,
             bullet_lead: bool = True,
             bullet_interval_range: Tuple[int, int] = (20, 60),
             bullet_volley: bool = False,
@@ -124,6 +127,12 @@ class SafeBulletDodge(SafeDodge):
             bullet_aim_std: Std (m) of the sideways distance between the line of fire and the torso centre,
                 normal around 0 (the humanoid's half-width is ~0.15-0.25 m with the arms).
             bullet_aim_offset: Max sideways distance (m) it is clipped to.
+            bullet_aim_parts: Hitboxes (geom names, e.g. 'head', 'right_hand') a shot aims at, one picked at
+                random per shot (name one twice to aim at it more often). The line of fire then goes through
+                that part where it is when the shot is fired, missed by bullet_aim_std sideways and up or down
+                (clipped to bullet_aim_offset), instead of at the torso at a height from bullet_height_mean /
+                std. A posture taken before the shot (bowing, kneeling) moves the aim with it, so only moving
+                the part after the shot dodges it. bullet_height_range still clips the height. None = off.
             bullet_lead: Aim at where the torso will be when the bullet arrives, from its horizontal velocity
                 at the shot, instead of where it is. Without it, swaying all the time makes most bullets miss.
             bullet_interval_range: (low, high) random number of steps an idle slot waits before firing.
@@ -180,6 +189,15 @@ class SafeBulletDodge(SafeDodge):
 
         kwargs['plane_enabled'] = False  # hides the plane and makes its cost 0
         super().__init__(**kwargs)
+
+        # Hitbox indices the shots aim at (the hitboxes exist only after SafeDodge's init)
+        self._aim_part_ids = None
+        if bullet_aim_parts is not None:
+            unknown = sorted(set(bullet_aim_parts) - set(self._part_names))
+            if len(bullet_aim_parts) == 0 or unknown:
+                raise ValueError(f'bullet_aim_parts must name hitboxes from {self._part_names}; '
+                                 f'unknown: {unknown}.')
+            self._aim_part_ids = jp.array([self._part_names.index(name) for name in bullet_aim_parts])
 
         model = self._render_model
         self._bullet_mocaps = [
@@ -262,7 +280,7 @@ class SafeBulletDodge(SafeDodge):
             wait = jp.where(ended, new_wait, jp.where(idle, b.wait - 1, b.wait))
             fire = self._slot_used & idle & (wait <= 0)
 
-        shot_pos, shot_vel = self._sample_shots(fire_rng, pipeline_state.x.pos[0], pipeline_state.xd.vel[0])
+        shot_pos, shot_vel = self._sample_shots(fire_rng, pipeline_state)
         parked = jp.array(self._PARKED)
         pos = jp.where(fire[:, None], shot_pos, jp.where(active[:, None], pos, parked))
         bullets = Bullets(pos=pos, vel=jp.where(fire[:, None], shot_vel, b.vel), active=active | fire,
@@ -325,10 +343,12 @@ class SafeBulletDodge(SafeDodge):
     # Bullets
     # ------------------------------------------------------------------------
 
-    def _sample_shots(self, rng: jax.Array, torso: jax.Array, torso_vel: jax.Array) -> Tuple[jax.Array, jax.Array]:
+    def _sample_shots(self, rng: jax.Array, pipeline_state: base.State) -> Tuple[jax.Array, jax.Array]:
         """A new shot for every slot: start position (B, 3) and velocity (B, 3)."""
         n = self._max_bullets
+        torso, torso_vel = pipeline_state.x.pos[0], pipeline_state.xd.vel[0]
         rng_heading, rng_height, rng_offset, rng_speed, rng_warning = jax.random.split(rng, 5)
+        rng_part = jax.random.fold_in(rng, 1)  # apart from the split, so shots without aim parts don't change
         low, high = self._bullet_heading_bounds
         angle = jax.random.uniform(rng_heading, (n,), minval=low, maxval=high)
         if self._bullet_volley:
@@ -338,14 +358,23 @@ class SafeBulletDodge(SafeDodge):
         # Normal around the body (as on the old bullets branch), so most bullets would hit a still humanoid
         miss = jp.clip(self._bullet_aim_std * jax.random.normal(rng_offset, (n, 1)),
                        -self._bullet_aim_offset, self._bullet_aim_offset)
-        height = jp.clip(self._bullet_height_mean + self._bullet_height_std * jax.random.normal(rng_height, (n, 1)),
-                         *self._bullet_height_range)
         speed = jax.random.uniform(rng_speed, (n, 1), minval=self._bullet_speed_range[0],
                                    maxval=self._bullet_speed_range[1])
         warning = jax.random.uniform(rng_warning, (n, 1), minval=self._bullet_warning_range[0],
                                      maxval=self._bullet_warning_range[1])
-        # Aim point: the torso, or where it will be when the bullet arrives
-        target = torso[:2] + (warning * torso_vel[:2] if self._bullet_lead else 0.0)
+        if self._aim_part_ids is None:
+            aim = jp.broadcast_to(torso[:2], (n, 2))
+            height = self._bullet_height_mean + self._bullet_height_std * jax.random.normal(rng_height, (n, 1))
+        else:
+            # A random body part, where it is now: its height (missed up or down like sideways) and position
+            center, _ = self._part_frames(pipeline_state)
+            part = self._aim_part_ids[jax.random.randint(rng_part, (n,), 0, self._aim_part_ids.shape[0])]
+            aim = center[part, :2]
+            height = center[part, 2:] + jp.clip(self._bullet_aim_std * jax.random.normal(rng_height, (n, 1)),
+                                                 -self._bullet_aim_offset, self._bullet_aim_offset)
+        height = jp.clip(height, *self._bullet_height_range)
+        # Aim point: the target, or where it will be when the bullet arrives (from the torso's velocity)
+        target = aim + (warning * torso_vel[:2] if self._bullet_lead else 0.0)
         start = target + miss * side - speed * warning * heading
         return (jp.concatenate([start, height], axis=-1),
                 jp.concatenate([speed * heading, jp.zeros((n, 1))], axis=-1))

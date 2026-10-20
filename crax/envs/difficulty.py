@@ -18,6 +18,16 @@ from typing import Any, Dict
 # These define difficulty levels for each task type, independent of agent
 # ============================================================================
 
+# Bullet dodge targets (hitbox geom names of the dodge humanoid). Upper body: the head, chest and upper
+# waist count twice, so ~60% of shots go at the body and ~40% at a forearm or hand.
+_BULLET_UPPER_PARTS = ("head", "head", "torso1", "torso1", "uwaist", "uwaist",
+                       "right_larm", "left_larm", "right_hand", "left_hand")
+# Down to the hips: ~55% head, torso and hips, ~45% forearms and hands. No leg shots: dodging one means
+# lifting or stepping a leg on the small platform, not the Matrix-style upper-body dodge this task is
+# after (lean, twist, duck, arms out of the way, feet planted).
+_BULLET_BODY_PARTS = ("head", "torso1", "uwaist", "lwaist", "butt",
+                      "right_larm", "left_larm", "right_hand", "left_hand")
+
 _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
     # Goal navigation task - navigate to goal while avoiding hazards
     "goal": {
@@ -203,20 +213,19 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
     },
 
     # Bullet dodge task - the dodge humanoid, with bullets that vanish on a hit instead of the plane.
-    # Every level has the same 6 observed bullet slots (max_bullets) and the same fall rules as dodge
-    # levels 2-3 (anything but the feet on the floor is a fall, so kneeling under everything isn't a way out).
+    # Every level has the same 6 observed bullet slots (max_bullets).
     # Platform: 0.5 m radius (dodge: 0.75), room for about one short step, so the dodge is mostly the body
     # moving, not walking away. Bullets lead the torso (bullet_lead), so swaying all the time doesn't help.
-    # Every bullet comes straight at the humanoid's front (bullet_heading 180, no spread), as in The Matrix;
-    # only where it crosses changes from bullet to bullet. Height and sideways miss are normal around the
-    # body (clipped to the ranges), as on the old bullets branch, so most would hit a humanoid that stands
-    # still (its half-width is ~0.15-0.25 m with the arms).
-    # Heights: every level mixes head (> 1.4 m), chest (1.15-1.4) and waist (< 1.15) bullets, so no one
-    # crouch clears them all: a small duck only clears the head ones, and a waist bullet can't be ducked at
-    # all (only stepped or leaned away from). Unlike dodge, the height reward keeps its default (full only
-    # standing at the spawn height, falling linearly to 0 at the fall height): a plane stays ~1 s, a bullet
-    # passes in a moment, so ducking only when one comes is cheap, but staying crouched is not (torso at
-    # 1.0 m: ~42% of the height reward, ~2100 an episode).
+    # Every bullet comes straight at the humanoid's front (bullet_heading 180, no spread), as in The Matrix.
+    # Aim: each shot goes at a random body part (bullet_aim_parts) where it is when the shot is fired, missed
+    # by bullet_aim_std sideways and up or down. Fixed heights let one posture held in advance clear every
+    # shot (bowing at the waist under level 4's chest-height volleys); aimed at the body, a bow or a kneel
+    # only moves the aim with it, so the only way to dodge is to move the part after the shot appears. The
+    # forearms and hands are targets too, so moving an arm out of the way is part of the task.
+    # Falls: only the torso below 0.6 m (or off the platform). Kneeling is allowed, but it dodges nothing
+    # (the shots follow the body down) and costs height reward: the height reward keeps its default (full
+    # only standing at the spawn height, falling linearly to 0 at the fall height; a kneel with the torso at
+    # ~0.9 m keeps ~40% of it, ~3000 an episode lost), so the policy has to stand back up.
     # A bullet appears bullet_warning_range seconds before it reaches the torso (just the time to move),
     # and a slot fires again soon after its last bullet is gone, so there is little time with nothing
     # coming, when standing still earns full reward for free.
@@ -226,42 +235,39 @@ _TASK_DIFFICULTY_CONFIGS: dict[str, dict[int, dict[str, Any]]] = {
     # as being hit by every shot
     "bullet_dodge": {
         # Level 1: Stand upright, no fall cost. Hidden bullets fly through the body (no cost) over every
-        # level's speeds, warnings and heights, so the observation normalizer has seen them before they
+        # level's speeds, warnings and targets, so the observation normalizer has seen them before they
         # count (dodge level 1 does the same for its plane)
         1: {"bullet_enabled": False, "num_bullets": 6, "platform_radius": 0.5, "fall_cost": 0.0,
             "upright_reward_weight": 5.0,
             "bullet_speed_range": [1.5, 5.0], "bullet_warning_range": [0.4, 1.2],
-            "bullet_height_mean": 1.15, "bullet_height_std": 0.35, "bullet_height_range": [0.6, 1.7],
-            "bullet_interval_range": [15, 90]},
-        # Level 2: 2 slow bullets with 0.8-1.2 s warning. Heights ~25% head, ~30% chest, ~45% waist.
+            "bullet_aim_parts": _BULLET_BODY_PARTS, "bullet_aim_std": 0.15, "bullet_aim_offset": 0.3,
+            "bullet_height_range": [0.2, 2.0], "bullet_interval_range": [15, 90]},
+        # Level 2: 2 slow bullets with 0.8-1.2 s warning, at any body part down to the hips.
         # A new one every ~2.3 s per slot (~13 an episode, estimate)
         2: {"num_bullets": 2, "platform_radius": 0.5, "bullet_hit_cost": 8.0,
             "bullet_speed_range": [1.5, 3.0], "bullet_warning_range": [0.8, 1.2],
-            "bullet_height_mean": 1.2, "bullet_height_std": 0.3, "bullet_height_range": [0.8, 1.7],
-            "bullet_aim_std": 0.15, "bullet_aim_offset": 0.3, "bullet_interval_range": [30, 90],
-            "fall_on_floor_contact": True, "upright_reward_weight": 3.0, "fall_cost": 100.0},
-        # Level 3: 6 faster bullets with 0.5-0.9 s warning, down to thigh height (0.6 m; shins would need
-        # a hop in under a second). Heights ~20% head, ~25% chest, ~55% waist and thighs.
+            "bullet_aim_parts": _BULLET_BODY_PARTS, "bullet_aim_std": 0.15, "bullet_aim_offset": 0.3,
+            "bullet_height_range": [0.2, 2.0], "bullet_interval_range": [30, 90],
+            "upright_reward_weight": 3.0, "fall_cost": 100.0},
+        # Level 3: 6 faster bullets with 0.5-0.9 s warning, same targets.
         # A new one every ~1.5 s per slot (~60 an episode)
         3: {"num_bullets": 6, "platform_radius": 0.5, "bullet_hit_cost": 1.65,
             "bullet_speed_range": [2.0, 4.0], "bullet_warning_range": [0.5, 0.9],
-            "bullet_height_mean": 1.1, "bullet_height_std": 0.35, "bullet_height_range": [0.6, 1.7],
-            "bullet_aim_std": 0.12, "bullet_aim_offset": 0.25, "bullet_interval_range": [15, 45],
-            "fall_on_floor_contact": True, "upright_reward_weight": 3.0, "fall_cost": 100.0},
-        # Level 4: The Matrix. Bursts of 6 at chest and head height, one shot every 12 steps (0.18 s, so a
-        # burst lasts ~0.9 s and 2-3 are in the air at once), each with 0.4-0.5 s warning: too little to
-        # squat under one and stand back up before the next. A burst every ~2.5 s (~36 shots, estimate).
-        # Heights ~25% head (a small duck clears these), ~75% chest (1.1-1.4: a duck would have to take the
-        # head below ~1.0 m). Leaning back clears them all; nothing rewards it.
-        # As on dodge level 4, the torso may go down to 0.3 m and the upright reward is waived while a
-        # bullet is within 1 m, so tipping back loses none of it
+            "bullet_aim_parts": _BULLET_BODY_PARTS, "bullet_aim_std": 0.12, "bullet_aim_offset": 0.25,
+            "bullet_height_range": [0.2, 2.0], "bullet_interval_range": [15, 45],
+            "upright_reward_weight": 3.0, "fall_cost": 100.0},
+        # Level 4: The Matrix. Bursts of 6 at the upper body (head, chest, forearms, hands), one shot every
+        # 12 steps (0.18 s, so a burst lasts ~0.9 s and 2-3 are in the air at once), each with 0.4-0.5 s
+        # warning. Each shot aims where its part is at that moment, so a bow taken at the first shot is just
+        # shot at; every shot has to be dodged on its own. A burst every ~2.5 s (~36 shots, estimate).
+        # The upright reward is paid as on every level (no upright_free_distance), so a lean costs reward
+        # and has to be undone.
         4: {"num_bullets": 6, "platform_radius": 0.5, "bullet_hit_cost": 2.75,
             "bullet_volley": True, "bullet_volley_spacing": 12, "bullet_speed_range": [4.0, 5.0],
             "bullet_warning_range": [0.4, 0.5],
-            "bullet_height_mean": 1.3, "bullet_height_std": 0.12, "bullet_height_range": [1.1, 1.6],
-            "bullet_aim_std": 0.08, "bullet_aim_offset": 0.15, "bullet_interval_range": [40, 80],
-            "fall_on_floor_contact": True, "healthy_z_range": [0.3, 2.0],
-            "upright_reward_weight": 3.0, "upright_free_distance": 1.0, "fall_cost": 100.0},
+            "bullet_aim_parts": _BULLET_UPPER_PARTS, "bullet_aim_std": 0.08, "bullet_aim_offset": 0.15,
+            "bullet_height_range": [0.2, 2.0], "bullet_interval_range": [40, 80],
+            "upright_reward_weight": 3.0, "fall_cost": 100.0},
     },
 
     # Lift task for Ant - keep certain feet off the ground
